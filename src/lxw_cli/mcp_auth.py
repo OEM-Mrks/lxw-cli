@@ -72,6 +72,14 @@ ENV_DATA_DIR = "LXW_MCP_DATA_DIR"
 
 CLAIM_KEY = "lexware_api_key"
 
+# Single coarse scope. claude.ai's OAuth expects a granted scope to be
+# advertised (scopes_supported) and echoed in the token response; a server
+# with no scope at all is a known trigger for "Authorization failed" even
+# though the token exchange itself succeeds. One scope keeps that happy
+# without adding real authorization granularity (the Lexware key is the
+# actual capability).
+DEFAULT_SCOPE = "mcp"
+
 
 # ---------------------------------------------------------------------------
 # Secret / Fernet helpers
@@ -235,7 +243,11 @@ class LexwareOAuthProvider(OAuthProvider):
     ) -> None:
         super().__init__(
             base_url=public_url,
-            client_registration_options=ClientRegistrationOptions(enabled=True),
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=[DEFAULT_SCOPE],
+                default_scopes=[DEFAULT_SCOPE],
+            ),
         )
         self._fernet = fernet_from_secret(secret)
         directory = data_dir or _default_data_dir()
@@ -286,7 +298,9 @@ class LexwareOAuthProvider(OAuthProvider):
                 "explicit": params.redirect_uri_provided_explicitly,
                 "state": params.state,
                 "challenge": params.code_challenge,
-                "scopes": params.scopes or [],
+                # Always grant the single coarse scope so the token response
+                # carries a scope (claude.ai expects one).
+                "scopes": params.scopes or [DEFAULT_SCOPE],
                 "resource": str(params.resource) if params.resource else None,
             },
         )
@@ -475,7 +489,7 @@ class LexwareOAuthProvider(OAuthProvider):
             return AccessToken(
                 token=token,
                 client_id="direct-bearer",
-                scopes=[],
+                scopes=[DEFAULT_SCOPE],
                 expires_at=None,
                 claims={CLAIM_KEY: token},
             )
