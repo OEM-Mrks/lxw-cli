@@ -314,18 +314,22 @@ Technisch spricht die TUI ausschließlich den UI-freien Core (`lxw_cli.core`)
 
 ## Claude-Integration (MCP-Server)
 
-Das CLI bringt einen eingebauten MCP-Server mit, mit dem **Claude Code** (und Claude Desktop) deine Lexware-Daten direkt abfragen kann.
+Das CLI bringt einen eingebauten MCP-Server mit, mit dem **Claude Code**, **Claude Desktop** und **Cowork** deine Lexware-Daten direkt abfragen können.
 
 ### Setup in einem Schritt
 
 ```bash
-lxw mcp install-claude
+lxw mcp install-claude    # Claude Code
+lxw mcp install-desktop   # Claude Desktop + Cowork
 ```
 
-Das registriert den Server bei Claude Code (Scope `user`, also für alle Projekte). Der API-Key wird dabei **nicht** an Claude übergeben — der Server liest ihn selbst aus `~/.config/lexware/.env` (chmod 600); falls er dort noch fehlt, legt `install-claude` ihn einmalig ab. Danach:
+Die beiden Frontends haben getrennte Konfigurationen: `install-claude` registriert den Server bei **Claude Code** (via `claude mcp add`, Scope `user`), `install-desktop` trägt ihn in die `claude_desktop_config.json` von **Claude Desktop** ein — das deckt auch **Cowork** ab. Nach `install-desktop` muss Claude Desktop einmal komplett beendet und neu gestartet werden (Quit, nicht nur Fenster schließen).
+
+Der API-Key wird dabei **nicht** an Claude übergeben — der Server liest ihn selbst aus `~/.config/lexware/.env` (chmod 600; Windows: `%APPDATA%\lexware\.env`); falls er dort noch fehlt, legen die Install-Befehle ihn einmalig ab. Prüfen:
 
 ```bash
-claude mcp list   # 'lexware' muss in der Liste erscheinen
+lxw mcp status    # zeigt Registrierung für Claude Code und Desktop
+claude mcp list   # 'lexware' muss in der Liste erscheinen (Claude Code)
 ```
 
 Öffne Claude Code in einem Projekt und frag z.B.:
@@ -356,10 +360,12 @@ Die `list_*`-Tools bieten dieselben Optionen wie die CLI:
 ### Weitere mcp-Befehle
 
 ```bash
-lxw mcp status              # zeigt aktuelle Registrierung
-lxw mcp install-claude --force   # Re-Install (z.B. nach API-Key-Wechsel)
-lxw mcp uninstall-claude    # entfernen
-lxw mcp serve               # läuft direkt — wird von Claude Code intern aufgerufen
+lxw mcp status                    # zeigt Registrierung (Claude Code + Desktop)
+lxw mcp install-claude --force    # Re-Install Claude Code (z.B. nach Pfad-Wechsel)
+lxw mcp install-desktop --force   # Re-Install Claude Desktop/Cowork
+lxw mcp uninstall-claude          # aus Claude Code entfernen
+lxw mcp uninstall-desktop         # aus Claude Desktop entfernen
+lxw mcp serve                     # läuft direkt — wird von Claude intern aufgerufen
 ```
 
 ## Out of Scope (v1)

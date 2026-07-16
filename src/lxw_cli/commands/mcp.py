@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 from dotenv import dotenv_values
@@ -16,6 +19,44 @@ from lxw_cli.output import console, err_console
 app = typer.Typer(no_args_is_help=True)
 
 MCP_NAME = "lexware"
+
+
+def desktop_config_path() -> Path:
+    """Location of Claude Desktop's `claude_desktop_config.json`.
+
+    Claude Desktop (and Cowork) read MCP servers from this file — registering
+    via `claude mcp add` only covers Claude Code. `CLAUDE_DESKTOP_CONFIG`
+    overrides the path (mostly for tests).
+    """
+    override = os.environ.get("CLAUDE_DESKTOP_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / (
+            "claude_desktop_config.json"
+        )
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return root / "Claude" / "claude_desktop_config.json"
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def _load_desktop_config(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        err_console.print(
+            f"[red]Fehler:[/red] {path} enthält kein gültiges JSON ({exc}). "
+            "Bitte die Datei prüfen — sie wird nicht angefasst."
+        )
+        raise typer.Exit(code=2) from exc
+    if not isinstance(data, dict):
+        err_console.print(f"[red]Fehler:[/red] {path} ist kein JSON-Objekt.")
+        raise typer.Exit(code=2)
+    return data
 
 
 def _check_claude() -> None:
@@ -138,24 +179,107 @@ def uninstall_claude(
     console.print(f"[green]✓[/green] Lexware MCP-Server entfernt (scope={scope}).")
 
 
+@app.command("install-desktop")
+def install_desktop(
+    force: bool = typer.Option(
+        False, "--force", help="Bestehenden 'lexware'-Eintrag überschreiben."
+    ),
+) -> None:
+    """Registriert den Lexware-MCP-Server bei Claude Desktop (und damit Cowork).
+
+    Claude Desktop liest MCP-Server aus `claude_desktop_config.json` —
+    `install-claude` deckt nur Claude Code ab. Nach der Registrierung muss
+    Claude Desktop einmal komplett neu gestartet werden.
+    """
+    config = load_config()  # validates LEXWARE_API_KEY
+    _ensure_global_key(config.api_key)
+
+    path = desktop_config_path()
+    if not path.parent.is_dir():
+        err_console.print(
+            f"[red]Fehler:[/red] {path.parent} existiert nicht — ist Claude "
+            "Desktop installiert? (https://claude.com/download)"
+        )
+        raise typer.Exit(code=2)
+
+    data = _load_desktop_config(path)
+    servers = data.setdefault("mcpServers", {})
+    if MCP_NAME in servers and not force:
+        err_console.print(
+            f"[yellow]Hinweis:[/yellow] '{MCP_NAME}' ist bereits in {path} "
+            "eingetragen. Mit `--force` überschreiben."
+        )
+        raise typer.Exit(code=1)
+
+    # Absolute path: GUI apps don't inherit the shell PATH, so a bare
+    # 'lxw-mcp' would not resolve when Desktop spawns the server.
+    command, *args = _mcp_command()
+    entry: dict[str, Any] = {"command": command}
+    if args:
+        entry["args"] = args
+    servers[MCP_NAME] = entry
+
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    console.print(
+        f"[green]✓[/green] Lexware MCP-Server in {path} eingetragen."
+    )
+    console.print(
+        "[bold]Claude Desktop jetzt komplett beenden und neu starten[/bold] "
+        "(Menü → Quit, nicht nur das Fenster schließen) — erst dann lädt es "
+        "die neue Konfiguration. Gilt auch für Cowork-Sessions."
+    )
+
+
+@app.command("uninstall-desktop")
+def uninstall_desktop() -> None:
+    """Entfernt den Lexware-MCP-Server aus Claude Desktop."""
+    path = desktop_config_path()
+    data = _load_desktop_config(path)
+    servers = data.get("mcpServers") or {}
+    if MCP_NAME not in servers:
+        console.print(f"[yellow]✗[/yellow] '{MCP_NAME}' ist in {path} nicht eingetragen.")
+        raise typer.Exit(code=1)
+    del servers[MCP_NAME]
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    console.print(f"[green]✓[/green] Lexware MCP-Server aus {path} entfernt.")
+
+
 @app.command("status")
 def status() -> None:
-    """Zeigt, ob der Lexware-MCP-Server aktuell bei Claude Code registriert ist."""
-    _check_claude()
-    result = subprocess.run(
-        ["claude", "mcp", "list"], capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        err_console.print(f"[red]Fehler:[/red] {result.stderr}")
-        raise typer.Exit(code=result.returncode)
-    if MCP_NAME in result.stdout:
-        for line in result.stdout.splitlines():
-            if MCP_NAME in line:
-                console.print(f"[green]✓[/green] {line.strip()}")
+    """Zeigt, wo der Lexware-MCP-Server registriert ist (Claude Code + Desktop)."""
+    # Claude Code (via `claude mcp list`)
+    if shutil.which("claude"):
+        result = subprocess.run(["claude", "mcp", "list"], capture_output=True, text=True)
+        if result.returncode == 0 and MCP_NAME in result.stdout:
+            for line in result.stdout.splitlines():
+                if MCP_NAME in line:
+                    console.print(f"[green]✓[/green] Claude Code: {line.strip()}")
+        else:
+            console.print(
+                "[yellow]✗[/yellow] Claude Code: nicht registriert. "
+                "Setup: [bold]lxw mcp install-claude[/bold]"
+            )
+    else:
+        console.print("[dim]– Claude Code: `claude` CLI nicht gefunden.[/dim]")
+
+    # Claude Desktop (claude_desktop_config.json)
+    path = desktop_config_path()
+    if not path.is_file():
+        console.print(f"[dim]– Claude Desktop: keine Konfiguration ({path}).[/dim]")
+        return
+    servers = _load_desktop_config(path).get("mcpServers") or {}
+    if MCP_NAME in servers:
+        entry = servers[MCP_NAME]
+        cmd = " ".join([entry.get("command", "?"), *entry.get("args", [])])
+        console.print(f"[green]✓[/green] Claude Desktop: {cmd}")
     else:
         console.print(
-            "[yellow]✗[/yellow] Lexware ist nicht registriert. "
-            "Setup: [bold]lxw mcp install-claude[/bold]"
+            "[yellow]✗[/yellow] Claude Desktop: nicht registriert. "
+            "Setup: [bold]lxw mcp install-desktop[/bold]"
         )
 
 

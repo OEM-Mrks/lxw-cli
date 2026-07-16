@@ -79,6 +79,83 @@ def test_mcp_install_claude_keeps_key_out_of_argv(
     assert "LEXWARE_API_KEY=test-key" in global_env_path().read_text(encoding="utf-8")
 
 
+@pytest.fixture
+def desktop_config(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Point the desktop config at a tmp file pre-filled with foreign entries."""
+    import lxw_cli.commands.mcp as mcp_cmd_mod
+
+    monkeypatch.setenv("LEXWARE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        mcp_cmd_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )
+    path = tmp_path / "Claude" / "claude_desktop_config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"other": {"command": "npx", "args": ["x"]}},
+                "preferences": {"keep": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_DESKTOP_CONFIG", str(path))
+    return path
+
+
+def test_mcp_install_desktop_writes_config(runner: CliRunner, desktop_config) -> None:
+    result = runner.invoke(app, ["mcp", "install-desktop"])
+    assert result.exit_code == 0, result.stderr
+
+    data = json.loads(desktop_config.read_text(encoding="utf-8"))
+    entry = data["mcpServers"]["lexware"]
+    # Absolute command path — Desktop doesn't inherit the shell PATH.
+    assert entry["command"] == "/usr/bin/lxw-mcp"
+    # Foreign servers and unrelated settings survive the merge untouched.
+    assert data["mcpServers"]["other"] == {"command": "npx", "args": ["x"]}
+    assert data["preferences"] == {"keep": True}
+    # The API key never lands in the desktop config …
+    assert "test-key" not in desktop_config.read_text(encoding="utf-8")
+    # … but in the global .env, where the server reads it.
+    from lxw_cli.config import global_env_path
+
+    assert "LEXWARE_API_KEY=test-key" in global_env_path().read_text(encoding="utf-8")
+
+
+def test_mcp_install_desktop_existing_needs_force(
+    runner: CliRunner, desktop_config
+) -> None:
+    assert runner.invoke(app, ["mcp", "install-desktop"]).exit_code == 0
+    # Second run without --force refuses …
+    assert runner.invoke(app, ["mcp", "install-desktop"]).exit_code == 1
+    # … with --force it overwrites.
+    result = runner.invoke(app, ["mcp", "install-desktop", "--force"])
+    assert result.exit_code == 0, result.stderr
+
+
+def test_mcp_uninstall_desktop_removes_only_lexware(
+    runner: CliRunner, desktop_config
+) -> None:
+    assert runner.invoke(app, ["mcp", "install-desktop"]).exit_code == 0
+    result = runner.invoke(app, ["mcp", "uninstall-desktop"])
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(desktop_config.read_text(encoding="utf-8"))
+    assert "lexware" not in data["mcpServers"]
+    assert "other" in data["mcpServers"]
+    # Removing again is a clean no-op error, not a crash.
+    assert runner.invoke(app, ["mcp", "uninstall-desktop"]).exit_code == 1
+
+
+def test_mcp_install_desktop_leaves_broken_json_untouched(
+    runner: CliRunner, desktop_config
+) -> None:
+    desktop_config.write_text("{not json", encoding="utf-8")
+    result = runner.invoke(app, ["mcp", "install-desktop"])
+    assert result.exit_code == 2
+    # The corrupt file was not overwritten.
+    assert desktop_config.read_text(encoding="utf-8") == "{not json"
+
+
 @respx.mock
 def test_invoices_list_default_caps_at_25(runner: CliRunner) -> None:
     page0 = [{"id": f"a{i}"} for i in range(100)]
