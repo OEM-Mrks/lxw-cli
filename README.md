@@ -298,7 +298,7 @@ Technisch spricht die TUI ausschließlich den UI-freien Core (`lxw_cli.core`)
 
 ## Claude-Integration (MCP-Server)
 
-Das CLI bringt einen eingebauten MCP-Server mit, mit dem **Claude Code** (und Claude Desktop) deine Lexware-Daten direkt abfragen kann — analog zum Spark-Mail-CLI von Readdle.
+Das CLI bringt einen eingebauten MCP-Server mit, mit dem **Claude Code** (und Claude Desktop) deine Lexware-Daten direkt abfragen kann.
 
 ### Setup in einem Schritt
 
