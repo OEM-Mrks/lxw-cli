@@ -408,7 +408,10 @@ class LexwareOAuthProvider(OAuthProvider):
             code_challenge=data["challenge"],
             redirect_uri=AnyUrl(data["redirect_uri"]),
             redirect_uri_provided_explicitly=data["explicit"],
-            resource=AnyUrl(data["resource"]) if data.get("resource") else None,
+            # The SDK's AuthorizationCode.resource is a plain string (RFC 8707
+            # audience), NOT an AnyUrl — wrapping it makes pydantic reject it.
+            # claude.ai always sends this, so a wrong type here 500s /token.
+            resource=data.get("resource") or None,
             api_key=data["key"],
         )
 

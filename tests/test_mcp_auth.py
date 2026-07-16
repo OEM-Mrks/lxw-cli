@@ -169,6 +169,10 @@ async def test_full_oauth_flow_and_tool_call(server: str) -> None:
                 "state": "st4te",
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
+                # claude.ai always sends scope + resource (RFC 8707). A wrong
+                # resource type in the code model 500s /token — regression guard.
+                "scope": "mcp",
+                "resource": server + "/mcp",
             },
         )
         assert auth.status_code in (302, 307), auth.text
