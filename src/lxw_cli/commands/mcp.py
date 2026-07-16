@@ -21,25 +21,46 @@ app = typer.Typer(no_args_is_help=True)
 MCP_NAME = "lexware"
 
 
+def _desktop_config_dirs() -> list[Path]:
+    """Candidate directories for Claude Desktop's configuration, per platform.
+
+    On Windows the classic install uses %APPDATA%\\Claude; the Microsoft-Store
+    build (MSIX) virtualizes AppData under
+    %LOCALAPPDATA%\\Packages\\Claude_<hash>\\LocalCache\\Roaming\\Claude.
+    """
+    if sys.platform == "darwin":
+        return [Path.home() / "Library" / "Application Support" / "Claude"]
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        dirs = [root / "Claude"]
+        local = os.environ.get("LOCALAPPDATA")
+        lroot = Path(local) if local else Path.home() / "AppData" / "Local"
+        dirs += sorted((lroot / "Packages").glob("Claude_*/LocalCache/Roaming/Claude"))
+        return dirs
+    return [Path.home() / ".config" / "Claude"]
+
+
 def desktop_config_path() -> Path:
     """Location of Claude Desktop's `claude_desktop_config.json`.
 
     Claude Desktop (and Cowork) read MCP servers from this file — registering
     via `claude mcp add` only covers Claude Code. `CLAUDE_DESKTOP_CONFIG`
-    overrides the path (mostly for tests).
+    overrides the path (mostly for tests). Among the platform candidates the
+    one already holding a config file wins, then the first existing directory,
+    then the classic default.
     """
     override = os.environ.get("CLAUDE_DESKTOP_CONFIG")
     if override:
         return Path(override).expanduser()
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Claude" / (
-            "claude_desktop_config.json"
-        )
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-        return root / "Claude" / "claude_desktop_config.json"
-    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+    candidates = _desktop_config_dirs()
+    for d in candidates:
+        if (d / "claude_desktop_config.json").is_file():
+            return d / "claude_desktop_config.json"
+    for d in candidates:
+        if d.is_dir():
+            return d / "claude_desktop_config.json"
+    return candidates[0] / "claude_desktop_config.json"
 
 
 def _load_desktop_config(path: Path) -> dict[str, Any]:

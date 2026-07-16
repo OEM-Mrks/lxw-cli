@@ -156,6 +156,32 @@ def test_mcp_install_desktop_leaves_broken_json_untouched(
     assert desktop_config.read_text(encoding="utf-8") == "{not json"
 
 
+def test_desktop_config_path_finds_windows_store_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The MSIX build virtualizes AppData under Packages/Claude_<hash>/…."""
+    import lxw_cli.commands.mcp as mcp_cmd_mod
+
+    monkeypatch.delenv("CLAUDE_DESKTOP_CONFIG", raising=False)
+    monkeypatch.setattr(mcp_cmd_mod.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    store_dir = (
+        tmp_path / "Local" / "Packages" / "Claude_pzs8sxrjxfjjc"
+        / "LocalCache" / "Roaming" / "Claude"
+    )
+    store_dir.mkdir(parents=True)
+
+    # Only the Store dir exists → it wins over the (missing) classic path.
+    assert mcp_cmd_mod.desktop_config_path() == store_dir / "claude_desktop_config.json"
+
+    # A config file in the classic location takes precedence once present.
+    classic = tmp_path / "Roaming" / "Claude"
+    classic.mkdir(parents=True)
+    (classic / "claude_desktop_config.json").write_text("{}", encoding="utf-8")
+    assert mcp_cmd_mod.desktop_config_path() == classic / "claude_desktop_config.json"
+
+
 @respx.mock
 def test_invoices_list_default_caps_at_25(runner: CliRunner) -> None:
     page0 = [{"id": f"a{i}"} for i in range(100)]
