@@ -52,6 +52,25 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 Ab dem nächsten cmd-Fenster reicht dann überall einfach `lxw`. Der API-Key
 wird beim ersten Start abgefragt und unter `%APPDATA%\lexware\.env` gespeichert.
 
+### Update
+
+Auf die neueste Version von PyPI:
+
+```bash
+uv tool upgrade lxw-cli        # oder: pipx upgrade lxw-cli
+lxw --version                  # Kontrolle
+```
+
+Sieht uv eine frisch veröffentlichte Version noch nicht (das PyPI-CDN braucht
+nach einem Release ein paar Minuten), erzwingt `--refresh` den Index-Abgleich:
+
+```bash
+uv tool upgrade --refresh lxw-cli
+```
+
+Der MCP-Server für Claude nutzt das Update automatisch mit — bereits laufende
+Claude-Sessions müssen dafür einmal neu gestartet werden.
+
 ### Aus dem Quellcode (Entwicklung)
 
 ```bash
@@ -60,6 +79,15 @@ cd lxw-cli
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
+
+Lokalen Arbeitsstand ohne Release als globales `lxw` installieren:
+
+```bash
+uv tool install --force --reinstall .
+```
+
+(`--reinstall` ist nötig — bei unveränderter Versionsnummer nimmt uv sonst
+den gecachten Build.)
 
 ## API-Key konfigurieren
 
