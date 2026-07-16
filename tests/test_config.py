@@ -143,3 +143,22 @@ def test_project_env_base_url_ok_when_matching_environment(
 
     assert cfg.base_url == "https://sandbox.example"
     assert "wird ignoriert" not in capsys.readouterr().err
+
+
+def test_empty_project_env_does_not_mask_global(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A bare `LEXWARE_API_KEY=` in a project .env must not hide the global key."""
+    monkeypatch.delenv("LEXWARE_API_KEY", raising=False)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".env").write_text("LEXWARE_API_KEY=\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("LEXWARE_CONFIG_DIR", str(tmp_path / "cfg"))
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / ".env").write_text(
+        "LEXWARE_API_KEY=from-global\n", encoding="utf-8"
+    )
+
+    cfg = load_config()
+    assert cfg.api_key == "from-global"

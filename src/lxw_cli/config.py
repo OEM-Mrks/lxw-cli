@@ -116,7 +116,9 @@ def _apply_project_env(path: Path) -> None:
             file=sys.stderr,
         )
     for key, value in values.items():
-        if value is not None and key not in os.environ:
+        # Skip empty values: a bare `LEXWARE_API_KEY=` line (e.g. a filled-in
+        # copy of .env.example left blank) must not mask the global config.
+        if value and key not in os.environ:
             os.environ[key] = value
 
 

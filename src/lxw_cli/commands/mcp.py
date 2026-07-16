@@ -188,8 +188,9 @@ def install_desktop(
     """Registriert den Lexware-MCP-Server bei Claude Desktop (und damit Cowork).
 
     Claude Desktop liest MCP-Server aus `claude_desktop_config.json` —
-    `install-claude` deckt nur Claude Code ab. Nach der Registrierung muss
-    Claude Desktop einmal komplett neu gestartet werden.
+    `install-claude` deckt nur Claude Code ab. Wichtig: Claude Desktop vorher
+    komplett beenden — die laufende App schreibt die Datei aus dem
+    Arbeitsspeicher zurück und überschreibt externe Änderungen.
     """
     config = load_config()  # validates LEXWARE_API_KEY
     _ensure_global_key(config.api_key)
@@ -226,9 +227,10 @@ def install_desktop(
         f"[green]✓[/green] Lexware MCP-Server in {path} eingetragen."
     )
     console.print(
-        "[bold]Claude Desktop jetzt komplett beenden und neu starten[/bold] "
-        "(Menü → Quit, nicht nur das Fenster schließen) — erst dann lädt es "
-        "die neue Konfiguration. Gilt auch für Cowork-Sessions."
+        "[bold]Wichtig:[/bold] Läuft Claude Desktop gerade, kann es diese "
+        "Änderung beim nächsten Speichern überschreiben — den Befehl am besten "
+        "bei beendeter App ausführen (Quit, nicht nur Fenster schließen) und "
+        "Desktop danach neu starten. Gilt auch für Cowork-Sessions."
     )
 
 

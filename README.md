@@ -323,7 +323,7 @@ lxw mcp install-claude    # Claude Code
 lxw mcp install-desktop   # Claude Desktop + Cowork
 ```
 
-Die beiden Frontends haben getrennte Konfigurationen: `install-claude` registriert den Server bei **Claude Code** (via `claude mcp add`, Scope `user`), `install-desktop` trägt ihn in die `claude_desktop_config.json` von **Claude Desktop** ein — das deckt auch **Cowork** ab. Nach `install-desktop` muss Claude Desktop einmal komplett beendet und neu gestartet werden (Quit, nicht nur Fenster schließen).
+Die beiden Frontends haben getrennte Konfigurationen: `install-claude` registriert den Server bei **Claude Code** (via `claude mcp add`, Scope `user`), `install-desktop` trägt ihn in die `claude_desktop_config.json` von **Claude Desktop** ein — das deckt auch **Cowork** ab. **Wichtig:** `install-desktop` bei beendetem Claude Desktop ausführen (Quit, nicht nur Fenster schließen) — die laufende App schreibt ihre Konfiguration aus dem Arbeitsspeicher zurück und überschreibt externe Änderungen. Danach Desktop starten.
 
 Der API-Key wird dabei **nicht** an Claude übergeben — der Server liest ihn selbst aus `~/.config/lexware/.env` (chmod 600; Windows: `%APPDATA%\lexware\.env`); falls er dort noch fehlt, legen die Install-Befehle ihn einmalig ab. Prüfen:
 
