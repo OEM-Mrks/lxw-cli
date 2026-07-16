@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lxw-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "Inoffizielles CLI/TUI/MCP-Tool für die Lexware Office API (vormals lexoffice)"
 readme = "README.md"
 requires-python = ">=3.11"
