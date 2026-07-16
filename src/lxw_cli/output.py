@@ -16,8 +16,12 @@ from rich.table import Table
 
 from lxw_cli.core.errors import LexwareError
 
-console = Console()
-err_console = Console(stderr=True)
+# legacy_windows=False: without it Rich falls back to a reduced box-character
+# set whenever it can't query the console mode (piped output, CI) on Windows —
+# making the rendering platform-dependent. Modern Windows terminals handle the
+# full set; only pre-Windows-10 cmd.exe would ever notice.
+console = Console(legacy_windows=False)
+err_console = Console(stderr=True, legacy_windows=False)
 
 
 @contextmanager

@@ -1,0 +1,2 @@
+# Snapshots werden byte-genau verglichen — niemals EOL-konvertieren.
+tests/snapshots/** -text
