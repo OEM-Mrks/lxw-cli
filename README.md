@@ -1,10 +1,14 @@
-# lexware-cli
+# lxw-cli
 
 Ein Kommandozeilen-Tool für die [Lexware Office API](https://developers.lexware.io/) (vormals lexoffice). Liest Rechnungen, Kontakte, Belege, Artikel, Angebote, Aufträge und Lieferscheine — und legt Drafts neu an.
 
+> **Hinweis:** Inoffizielles Community-Tool — kein Produkt der Haufe-Lexware
+> GmbH & Co. KG und nicht mit ihr verbunden. „Lexware" ist eine Marke der
+> Haufe Group.
+
 ## Features
 
-- Zwei Frontends auf einem UI-freien Core: **CLI** (skriptbar) und **interaktive TUI** (`lexware` ohne Argumente)
+- Zwei Frontends auf einem UI-freien Core: **CLI** (skriptbar) und **interaktive TUI** (`lxw` ohne Argumente)
 - Lesen: `list` (paginiert + Filter), `get` (Detail), `pdf` (Download)
 - Schreiben: `create-draft` für Belege (Rechnungen, Angebote, Aufträge, Lieferscheine, Belege), `create` für Stammdaten (Kontakte, Artikel)
 - Paginierung: `--limit N`, `--all`/`-a` bzw. `--limit 0` für **alle** Treffer über alle Seiten
@@ -17,32 +21,42 @@ Ein Kommandozeilen-Tool für die [Lexware Office API](https://developers.lexware
 
 ## Installation
 
-Empfohlen mit [uv](https://docs.astral.sh/uv/):
+Läuft auf **macOS, Linux und Windows** (Python ≥ 3.11). Empfohlen als
+isoliertes Tool mit [uv](https://docs.astral.sh/uv/) oder
+[pipx](https://pipx.pypa.io/):
 
 ```bash
-uv venv
-source .venv/bin/activate
-uv pip install -e .
+uv tool install lxw-cli      # oder: pipx install lxw-cli
+lxw profile
 ```
 
-Oder klassisch:
+Alternativ klassisch in ein Environment:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install lxw-cli
+```
+
+### Aus dem Quellcode (Entwicklung)
+
+```bash
+git clone https://github.com/markusoeffling/lxw-cli
+cd lxw-cli
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
 ```
 
 ## API-Key konfigurieren
 
 Lege einen API-Key in deinem Lexware-Account an: <https://app.lexware.de/addons/public-api>
 
-**Einfachste Variante:** Ruf `lexware` einfach auf. Findet das Tool keinen Key,
+**Einfachste Variante:** Ruf `lxw` einfach auf. Findet das Tool keinen Key,
 fragt es im Terminal danach, prüft ihn gegen die API und speichert ihn unter
-`~/.config/lexware/.env` (Datei-Rechte `0600`, nur für dich lesbar). Ab dann
-funktioniert `lexware` aus **jedem** Verzeichnis, ohne weitere Einrichtung.
+`~/.config/lexware/.env` (Datei-Rechte `0600`, nur für dich lesbar; unter
+Windows `%APPDATA%\lexware\.env`). Ab dann funktioniert `lxw` aus **jedem**
+Verzeichnis, ohne weitere Einrichtung.
 
 ```bash
-lexware profile
+lxw profile
 # → Kein Lexware API-Key gefunden. Lexware API-Key: ********
 # → ✓ API-Key gespeichert in ~/.config/lexware/.env — angemeldet als Acme GmbH
 ```
@@ -51,7 +65,7 @@ Der Key wird in dieser Reihenfolge gesucht:
 
 1. gesetzte Environment-Variable `LEXWARE_API_KEY`
 2. projektlokale `.env` (vom aktuellen Verzeichnis aufwärts — praktisch für die Entwicklung)
-3. globale `~/.config/lexware/.env` (oder `$XDG_CONFIG_HOME/lexware/.env`)
+3. globale `~/.config/lexware/.env` (bzw. `$XDG_CONFIG_HOME/lexware/.env`; unter Windows `%APPDATA%\lexware\.env`)
 
 Wer es manuell vorziehen will, kann den Key auch direkt setzen:
 
@@ -67,67 +81,67 @@ gefragt — dort muss der Key vorab über eine der drei Quellen vorhanden sein.
 
 ```bash
 # Auth-Test: zeigt Firmenprofil
-lexware profile
+lxw profile
 
 # Rechnungen (Tabelle) — Standard: 25 Einträge
-lexware invoices list --limit 10
+lxw invoices list --limit 10
 
 # ALLE Rechnungen laden (paginiert automatisch über alle Seiten)
-lexware invoices list --all
-lexware invoices list --limit 0          # gleichbedeutend
+lxw invoices list --all
+lxw invoices list --limit 0          # gleichbedeutend
 
 # Archivierte sind standardmäßig ausgeblendet — bei Bedarf einblenden
-lexware invoices list --include-archived
-lexware contacts list --include-archived
+lxw invoices list --include-archived
+lxw contacts list --include-archived
 
 # Rechnungen als JSON in jq pipen
-lexware --json invoices list --status open | jq '.[].voucherNumber'
+lxw --json invoices list --status open | jq '.[].voucherNumber'
 
 # CSV-Export von Kunden
-lexware --csv --output kunden.csv contacts list --customer --limit 200
+lxw --csv --output kunden.csv contacts list --customer --limit 200
 
 # Artikel suchen — Teiltreffer in Bezeichnung, Beschreibung und Artikelnummer
-lexware articles list --search "schraube"
-lexware articles list -q "SCH-"          # auch Teil-Artikelnummern
-lexware articles list --number SCH-001   # exakte Artikelnummer (serverseitig, schnell)
+lxw articles list --search "schraube"
+lxw articles list -q "SCH-"          # auch Teil-Artikelnummern
+lxw articles list --number SCH-001   # exakte Artikelnummer (serverseitig, schnell)
 
 # Rechnung per Belegnummer abrufen (UUID auch möglich)
-lexware invoices get FB2600682
-lexware --json invoices get FB2600682 | jq '.totalGrossAmount'
+lxw invoices get FB2600682
+lxw --json invoices get FB2600682 | jq '.totalGrossAmount'
 
 # PDF einer Rechnung herunterladen (UUID oder Belegnummer)
-lexware invoices pdf FB2600682                       # → ./invoice-FB2600682.pdf
-lexware invoices pdf FB2600682 --output ~/Rechnungen # Verzeichnis: Dateiname automatisch
-lexware invoices pdf FB2600682 --output rechnung.pdf # exakter Dateipfad
+lxw invoices pdf FB2600682                       # → ./invoice-FB2600682.pdf
+lxw invoices pdf FB2600682 --output ~/Rechnungen # Verzeichnis: Dateiname automatisch
+lxw invoices pdf FB2600682 --output rechnung.pdf # exakter Dateipfad
 
 # Kontakt anlegen (Stammdaten — kein Draft)
-lexware contacts create --body '{
+lxw contacts create --body '{
   "roles": {"customer": {}},
   "company": {"name": "Test GmbH"}
 }'
 
 # Komplexere Bodies aus Datei
-lexware invoices create-draft --body @invoice-template.json
+lxw invoices create-draft --body @invoice-template.json
 ```
 
 ## Verfügbare Befehle
 
 | Befehl | Zweck |
 |---|---|
-| `lexware profile` | Firmenprofil abrufen (Auth-Test) |
-| `lexware invoices` | Rechnungen: `list`, `get`, `pdf`, `create-draft` |
-| `lexware contacts` | Kontakte: `list`, `get`, `create` |
-| `lexware vouchers` | Belege: `list`, `get`, `create-draft` |
-| `lexware articles` | Artikel: `list`, `get`, `create` (mit Volltextsuche) |
-| `lexware quotations` | Angebote: `list`, `get`, `pdf`, `create-draft` |
-| `lexware orders` | Aufträge (Auftragsbestätigungen): `list`, `get`, `pdf`, `create-draft` |
-| `lexware delivery-notes` | Lieferscheine: `list`, `get`, `pdf`, `create-draft` |
+| `lxw profile` | Firmenprofil abrufen (Auth-Test) |
+| `lxw invoices` | Rechnungen: `list`, `get`, `pdf`, `create-draft` |
+| `lxw contacts` | Kontakte: `list`, `get`, `create` |
+| `lxw vouchers` | Belege: `list`, `get`, `create-draft` |
+| `lxw articles` | Artikel: `list`, `get`, `create` (mit Volltextsuche) |
+| `lxw quotations` | Angebote: `list`, `get`, `pdf`, `create-draft` |
+| `lxw orders` | Aufträge (Auftragsbestätigungen): `list`, `get`, `pdf`, `create-draft` |
+| `lxw delivery-notes` | Lieferscheine: `list`, `get`, `pdf`, `create-draft` |
 
 Hinweis: `create-draft` legt **Belege** als Entwurf an (Draft, nicht finalisiert);
 **Stammdaten** (Kontakte, Artikel) kennen keinen Draft-Status und werden mit
 `create` direkt angelegt.
 
-Detail-Hilfe mit `lexware <command> --help` bzw. `lexware <command> list --help`.
+Detail-Hilfe mit `lxw <command> --help` bzw. `lxw <command> list --help`.
 
 ## Suchen, Filtern & Paginierung
 
@@ -145,8 +159,8 @@ damit so wenige Requests wie möglich nötig sind.
 | `--all`, `-a` | Wie `--limit 0`; überschreibt ein gesetztes `--limit`. |
 
 ```bash
-lexware invoices list --all          # alle Rechnungen
-lexware contacts list --customer -a  # alle Kunden
+lxw invoices list --all          # alle Rechnungen
+lxw contacts list --customer -a  # alle Kunden
 ```
 
 Am Listenende wird die **Gesamtzahl** der Datensätze ausgegeben (aus dem
@@ -185,11 +199,11 @@ getrennt — gut für Pipes und Weiterverarbeitung durch LLMs). Auf Wunsch nur e
 Rolle oder optional gruppiert:
 
 ```bash
-lexware contacts list                    # aktive Kontakte, eine Liste
-lexware contacts list --customer         # nur Kunden (serverseitig gefiltert)
-lexware contacts list --vendor           # nur Lieferanten (serverseitig gefiltert)
-lexware contacts list --grouped          # Tabelle in Kunden-/Lieferanten-Abschnitte
-lexware contacts list --include-archived # archivierte Kontakte einblenden
+lxw contacts list                    # aktive Kontakte, eine Liste
+lxw contacts list --customer         # nur Kunden (serverseitig gefiltert)
+lxw contacts list --vendor           # nur Lieferanten (serverseitig gefiltert)
+lxw contacts list --grouped          # Tabelle in Kunden-/Lieferanten-Abschnitte
+lxw contacts list --include-archived # archivierte Kontakte einblenden
 ```
 
 Bei `--grouped` zeigt jede Tabelle die passende Kunden- bzw. Lieferantennummer;
@@ -199,7 +213,7 @@ Kontakte mit beiden Rollen erscheinen in beiden Abschnitten (`role`-Spalte =
 
 **Archivierte Kontakte** werden standardmäßig ausgeblendet — `--include-archived`
 zeigt sie wieder. Da die Kontakt-API archivierte nicht serverseitig filtern kann,
-geschieht das clientseitig: `lexware` blättert durch die Seiten und überspringt
+geschieht das clientseitig: `lxw` blättert durch die Seiten und überspringt
 archivierte, bis genug aktive für das `--limit` zusammen sind. Der Footer zeigt
 dann z.B. `→ 298 aktive Kontakte gesamt (14 archivierte ausgeblendet)`.
 
@@ -211,10 +225,10 @@ Teil-Artikelnummer** gibt es `--search`/`-q` — dabei werden Artikel clientseit
 durchsucht (Teiltreffer, Groß-/Kleinschreibung egal):
 
 ```bash
-lexware articles list -q "schraube"        # Bezeichnung/Beschreibung
-lexware articles list -q "SCH-"            # Teil-Artikelnummer
-lexware articles list --number SCH-001     # exakte Nummer (serverseitig, schnell)
-lexware articles list -q "kabel" --type product --all   # kombinierbar
+lxw articles list -q "schraube"        # Bezeichnung/Beschreibung
+lxw articles list -q "SCH-"            # Teil-Artikelnummer
+lxw articles list --number SCH-001     # exakte Nummer (serverseitig, schnell)
+lxw articles list -q "kabel" --type product --all   # kombinierbar
 ```
 
 Hinweis: `--search` scannt im Zweifel alle Artikel (bricht ab, sobald genug
@@ -237,8 +251,8 @@ Neben der CLI gibt es eine **Terminal-UI** zum Durchstöbern deiner Daten
 und zum Anlegen neuer Aufträge als Entwurf.
 
 ```bash
-lexware            # ohne Argumente im Terminal → TUI startet automatisch
-lexware-tui        # oder explizit
+lxw            # ohne Argumente im Terminal → TUI startet automatisch
+lxw-tui        # oder explizit
 ```
 
 ![TUI](docs/tui-screenshot.svg)
@@ -275,11 +289,11 @@ lexware-tui        # oder explizit
 - Firmenname oben = Verbindungstest; Fehler aus der API werden als Hinweis und
   in der Statuszeile angezeigt (nie verschluckt).
 
-Die TUI startet **nur im interaktiven Terminal**. Sobald `lexware` mit
+Die TUI startet **nur im interaktiven Terminal**. Sobald `lxw` mit
 Argumenten aufgerufen wird oder die Ausgabe in eine Pipe/Datei geht, verhält es
 sich unverändert wie die CLI — Skripte und `… | jq` bleiben also unberührt.
 
-Technisch spricht die TUI ausschließlich den UI-freien Core (`lexware_cli.core`)
+Technisch spricht die TUI ausschließlich den UI-freien Core (`lxw_cli.core`)
 — exakt dieselbe API wie CLI und MCP-Server.
 
 ## Claude-Integration (MCP-Server)
@@ -289,7 +303,7 @@ Das CLI bringt einen eingebauten MCP-Server mit, mit dem **Claude Code** (und Cl
 ### Setup in einem Schritt
 
 ```bash
-lexware mcp install-claude
+lxw mcp install-claude
 ```
 
 Das registriert den Server bei Claude Code (Scope `user`, also für alle Projekte). Der API-Key wird dabei **nicht** an Claude übergeben — der Server liest ihn selbst aus `~/.config/lexware/.env` (chmod 600); falls er dort noch fehlt, legt `install-claude` ihn einmalig ab. Danach:
@@ -326,10 +340,10 @@ Die `list_*`-Tools bieten dieselben Optionen wie die CLI:
 ### Weitere mcp-Befehle
 
 ```bash
-lexware mcp status              # zeigt aktuelle Registrierung
-lexware mcp install-claude --force   # Re-Install (z.B. nach API-Key-Wechsel)
-lexware mcp uninstall-claude    # entfernen
-lexware mcp serve               # läuft direkt — wird von Claude Code intern aufgerufen
+lxw mcp status              # zeigt aktuelle Registrierung
+lxw mcp install-claude --force   # Re-Install (z.B. nach API-Key-Wechsel)
+lxw mcp uninstall-claude    # entfernen
+lxw mcp serve               # läuft direkt — wird von Claude Code intern aufgerufen
 ```
 
 ## Out of Scope (v1)
