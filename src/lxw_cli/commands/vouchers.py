@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import typer
 
-from lexware_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
-from lexware_cli.core import services
-from lexware_cli.core.constants import DEFAULT_VOUCHER_STATUSES, DEFAULT_VOUCHER_TYPES
-from lexware_cli.output import print_count, render, working
+from lxw_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
+from lxw_cli.core import services
+from lxw_cli.core.constants import DEFAULT_VOUCHER_STATUSES, DEFAULT_VOUCHER_TYPES
+from lxw_cli.output import print_count, render, working
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -26,13 +26,13 @@ LIST_COLUMNS = [
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Nur Eingangsrechnungen: [green]lexware vouchers list --type purchaseinvoice[/green]
+Nur Eingangsrechnungen: [green]lxw vouchers list --type purchaseinvoice[/green]
 
-Offene & überfällige: [green]lexware vouchers list --status open,overdue[/green]
+Offene & überfällige: [green]lxw vouchers list --status open,overdue[/green]
 
-Alle eines Kontakts: [green]lexware vouchers list --contact-id <uuid> --all[/green]
+Alle eines Kontakts: [green]lxw vouchers list --contact-id <uuid> --all[/green]
 
-Inkl. archivierte: [green]lexware vouchers list --include-archived[/green]
+Inkl. archivierte: [green]lxw vouchers list --include-archived[/green]
 """,
 )
 def list_vouchers(

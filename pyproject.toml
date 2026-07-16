@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "lexware-cli"
+name = "lxw-cli"
 version = "0.1.0"
-description = "Command-line tool for querying the Lexware Office API"
+description = "Inoffizielles CLI/TUI/MCP-Tool für die Lexware Office API (vormals lexoffice)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Markus Oeffling" }]
-keywords = ["lexware", "lexoffice", "cli", "api"]
+keywords = ["lexware", "lexoffice", "cli", "tui", "mcp", "api"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -42,15 +42,16 @@ dev = [
 ]
 
 [project.scripts]
-lexware = "lexware_cli.cli:_run"
-lexware-mcp = "lexware_cli.mcp_server:run"
-lexware-tui = "lexware_cli.tui.app:run"
+lxw = "lxw_cli.cli:_run"
+lxw-mcp = "lxw_cli.mcp_server:run"
+lxw-tui = "lxw_cli.tui.app:run"
 
 [project.urls]
-Homepage = "https://developers.lexware.io/"
+Homepage = "https://github.com/markusoeffling/lxw-cli"
+Documentation = "https://developers.lexware.io/"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/lexware_cli"]
+packages = ["src/lxw_cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -66,5 +67,5 @@ select = ["E", "F", "I", "B", "UP", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 # Typer's idiomatic API requires typer.Option/Argument calls in defaults
-"src/lexware_cli/cli.py" = ["B008"]
-"src/lexware_cli/commands/*.py" = ["B008"]
+"src/lxw_cli/cli.py" = ["B008"]
+"src/lxw_cli/commands/*.py" = ["B008"]

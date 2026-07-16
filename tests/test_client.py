@@ -4,8 +4,8 @@ import httpx
 import pytest
 import respx
 
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.core.errors import LexwareAPIError
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.core.errors import LexwareAPIError
 
 
 @respx.mock
@@ -16,7 +16,7 @@ def test_get_sends_bearer_token(client: LexwareClient) -> None:
     data = client.get("/v1/profile")
     assert data == {"companyName": "Acme GmbH"}
     assert route.calls.last.request.headers["Authorization"] == "Bearer test-key"
-    assert route.calls.last.request.headers["User-Agent"].startswith("lexware-cli/")
+    assert route.calls.last.request.headers["User-Agent"].startswith("lxw-cli/")
 
 
 @respx.mock
@@ -111,8 +111,8 @@ def test_wait_for_retry_uses_retry_after_once() -> None:
     """The retry wait honors Retry-After (capped) — no double waiting."""
     from types import SimpleNamespace
 
-    from lexware_cli.core.client import MAX_RETRY_AFTER, _wait_for_retry
-    from lexware_cli.core.errors import RateLimitError
+    from lxw_cli.core.client import MAX_RETRY_AFTER, _wait_for_retry
+    from lxw_cli.core.errors import RateLimitError
 
     def state(exc):
         return SimpleNamespace(

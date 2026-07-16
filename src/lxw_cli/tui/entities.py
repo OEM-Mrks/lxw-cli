@@ -11,11 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from lexware_cli.core import services
+from lxw_cli.core import services
 
 if TYPE_CHECKING:
-    from lexware_cli.core.client import LexwareClient
-    from lexware_cli.core.models import ListResult
+    from lxw_cli.core.client import LexwareClient
+    from lxw_cli.core.models import ListResult
 
 # Rows fetched per load in the browse view: one full API page (the server
 # maximum), so each request brings in as many records as allowed. Scrolling to

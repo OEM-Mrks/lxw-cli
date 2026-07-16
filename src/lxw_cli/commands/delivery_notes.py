@@ -4,10 +4,10 @@ from pathlib import Path
 
 import typer
 
-from lexware_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
-from lexware_cli.core import services
-from lexware_cli.core.constants import DEFAULT_VOUCHER_STATUSES
-from lexware_cli.output import print_count, render, working, write_binary
+from lxw_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
+from lxw_cli.core import services
+from lxw_cli.core.constants import DEFAULT_VOUCHER_STATUSES
+from lxw_cli.output import print_count, render, working, write_binary
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -25,11 +25,11 @@ LIST_COLUMNS = [
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Alle Lieferscheine: [green]lexware delivery-notes list --all[/green]
+Alle Lieferscheine: [green]lxw delivery-notes list --all[/green]
 
-Als CSV exportieren: [green]lexware --csv -o lieferscheine.csv delivery-notes list --all[/green]
+Als CSV exportieren: [green]lxw --csv -o lieferscheine.csv delivery-notes list --all[/green]
 
-Inkl. archivierte: [green]lexware delivery-notes list --include-archived[/green]
+Inkl. archivierte: [green]lxw delivery-notes list --include-archived[/green]
 """,
 )
 def list_delivery_notes(

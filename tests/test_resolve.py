@@ -4,9 +4,9 @@ import httpx
 import pytest
 import respx
 
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.core.errors import LexwareError
-from lexware_cli.core.services import (
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.core.errors import LexwareError
+from lxw_cli.core.services import (
     looks_like_uuid,
     resolve_max_items,
     resolve_voucher_id,

@@ -13,17 +13,17 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from lexware_cli.core.constants import (
+from lxw_cli.core.constants import (
     ALL_VOUCHER_TYPES,
     DEFAULT_VOUCHER_STATUSES,
     DEFAULT_VOUCHER_TYPES,
     INVOICE_LIKE_TYPES,
 )
-from lexware_cli.core.errors import LexwareAPIError, LexwareError
-from lexware_cli.core.models import ListResult
+from lxw_cli.core.errors import LexwareAPIError, LexwareError
+from lxw_cli.core.models import ListResult
 
 if TYPE_CHECKING:
-    from lexware_cli.core.client import LexwareClient
+    from lxw_cli.core.client import LexwareClient
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values, find_dotenv, load_dotenv
 
-from lexware_cli.core.errors import ConfigError
+from lxw_cli.core.errors import ConfigError
 
 DEFAULT_BASE_URL = "https://api.lexware.io"
 ENV_KEY = "LEXWARE_API_KEY"
@@ -22,7 +22,7 @@ class Config:
 
 
 def config_dir() -> Path:
-    """User-level config directory for lexware-cli.
+    """User-level config directory for lxw-cli.
 
     Honors `LEXWARE_CONFIG_DIR` (explicit override, mostly for tests), then
     `XDG_CONFIG_HOME`, and finally defaults to ~/.config/lexware. This is the
@@ -56,7 +56,7 @@ def load_config() -> Config:
             "LEXWARE_API_KEY ist nicht gesetzt. "
             "Generiere einen API-Key unter https://app.lexware.de/addons/public-api "
             "und exportiere ihn als Environment-Variable oder lege ihn in einer .env-Datei ab. "
-            "In einem interaktiven Terminal fragt `lexware` beim ersten Aufruf "
+            "In einem interaktiven Terminal fragt `lxw` beim ersten Aufruf "
             "automatisch danach und speichert ihn unter ~/.config/lexware/.env."
         )
     base_url = os.getenv(ENV_BASE_URL, DEFAULT_BASE_URL).rstrip("/")
@@ -140,9 +140,9 @@ def _can_prompt() -> bool:
 def _prompt_and_store_key() -> str:
     # Imported lazily: client imports this module at import time, so importing
     # it here avoids a circular import while still letting us validate the key.
-    from lexware_cli.core.client import LexwareClient
-    from lexware_cli.core.errors import LexwareAPIError
-    from lexware_cli.output import err_console
+    from lxw_cli.core.client import LexwareClient
+    from lxw_cli.core.errors import LexwareAPIError
+    from lxw_cli.output import err_console
 
     err_console.print(
         "[yellow]Kein Lexware API-Key gefunden.[/yellow]\n"

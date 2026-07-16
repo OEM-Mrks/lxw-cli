@@ -4,10 +4,10 @@ import httpx
 import respx
 from textual.widgets import DataTable
 
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.core.models import ListResult
-from lexware_cli.tui.app import LexwareTUI, _summary
-from lexware_cli.tui.entities import build_entities, contact_row
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.core.models import ListResult
+from lxw_cli.tui.app import LexwareTUI, _summary
+from lxw_cli.tui.entities import build_entities, contact_row
 
 _PROFILE = "https://api.lexware.io/v1/profile"
 _VOUCHERLIST = "https://api.lexware.io/v1/voucherlist"
@@ -134,7 +134,7 @@ async def test_tui_surfaces_core_errors(config) -> None:
 
 
 def test_order_form_helpers() -> None:
-    from lexware_cli.tui.order_form import format_position, parse_price, parse_quantity
+    from lxw_cli.tui.order_form import format_position, parse_price, parse_quantity
 
     assert parse_quantity("2") == 2.0
     assert parse_quantity("1,5") == 1.5
@@ -156,7 +156,7 @@ def test_order_form_helpers() -> None:
 
 @respx.mock
 async def test_tui_creates_order_draft_and_switches_to_orders(config) -> None:
-    from lexware_cli.tui.order_form import OrderCreateScreen
+    from lxw_cli.tui.order_form import OrderCreateScreen
 
     respx.get(_PROFILE).mock(
         return_value=httpx.Response(200, json={"companyName": "Acme GmbH"})
@@ -217,7 +217,7 @@ async def test_tui_creates_order_draft_and_switches_to_orders(config) -> None:
 
 @respx.mock
 async def test_order_form_escape_cancels(config) -> None:
-    from lexware_cli.tui.order_form import OrderCreateScreen
+    from lxw_cli.tui.order_form import OrderCreateScreen
 
     respx.get(_PROFILE).mock(
         return_value=httpx.Response(200, json={"companyName": "Acme GmbH"})
@@ -249,7 +249,7 @@ async def test_article_search_shows_loading_animation(config) -> None:
 
     from textual.widgets import OptionList
 
-    from lexware_cli.tui.order_form import OrderCreateScreen
+    from lxw_cli.tui.order_form import OrderCreateScreen
 
     respx.get(_PROFILE).mock(
         return_value=httpx.Response(200, json={"companyName": "Acme GmbH"})
@@ -299,7 +299,7 @@ async def test_article_search_shows_loading_animation(config) -> None:
 
 @respx.mock
 def test_search_contacts_picks_name_or_email_param(config) -> None:
-    from lexware_cli.tui.entities import search_contacts
+    from lxw_cli.tui.entities import search_contacts
 
     route = respx.get("https://api.lexware.io/v1/contacts").mock(
         return_value=httpx.Response(200, json={"content": [], "last": True})
@@ -434,7 +434,7 @@ async def test_contacts_api_search_replaces_rows(config) -> None:
 
 
 def test_humanize_value() -> None:
-    from lexware_cli.tui.detail import humanize_value
+    from lxw_cli.tui.detail import humanize_value
 
     assert humanize_value(None) == "—"
     assert humanize_value("") == "—"
@@ -448,7 +448,7 @@ def test_humanize_value() -> None:
 
 
 def test_flatten_fields_builds_readable_rows() -> None:
-    from lexware_cli.tui.detail import flatten_fields
+    from lxw_cli.tui.detail import flatten_fields
 
     data = {
         "voucherNumber": "RG-1",
@@ -473,7 +473,7 @@ def test_flatten_fields_builds_readable_rows() -> None:
 
 @respx.mock
 async def test_detail_screen_toggles_between_fields_and_json(config) -> None:
-    from lexware_cli.tui.detail import DetailScreen
+    from lxw_cli.tui.detail import DetailScreen
 
     respx.get(_PROFILE).mock(
         return_value=httpx.Response(200, json={"companyName": "Acme GmbH"})

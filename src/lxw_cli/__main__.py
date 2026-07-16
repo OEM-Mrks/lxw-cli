@@ -1,4 +1,4 @@
-from lexware_cli.cli import app
+from lxw_cli.cli import app
 
 if __name__ == "__main__":
     app()

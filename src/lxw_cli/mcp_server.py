@@ -1,6 +1,6 @@
 """FastMCP server exposing the Lexware Office API to Claude.
 
-A thin frontend over :mod:`lexware_cli.core.services` — the exact same
+A thin frontend over :mod:`lxw_cli.core.services` — the exact same
 UI-agnostic operations the CLI uses, so both stay in sync by construction.
 """
 
@@ -11,10 +11,10 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from lexware_cli.config import load_config
-from lexware_cli.core import services
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.output import safe_filename
+from lxw_cli.config import load_config
+from lxw_cli.core import services
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.output import safe_filename
 
 mcp: FastMCP = FastMCP(
     name="lexware",
@@ -359,7 +359,7 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def run() -> None:
-    """Entry point for `lexware-mcp` — runs the MCP server over stdio."""
+    """Entry point for `lxw-mcp` — runs the MCP server over stdio."""
     mcp.run()
 
 

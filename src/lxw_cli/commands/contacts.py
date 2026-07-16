@@ -4,9 +4,9 @@ from typing import Any
 
 import typer
 
-from lexware_cli.commands._common import load_json_arg, state
-from lexware_cli.core import services
-from lexware_cli.output import OutputFormat, err_console, print_count, render, working
+from lxw_cli.commands._common import load_json_arg, state
+from lxw_cli.core import services
+from lxw_cli.output import OutputFormat, err_console, print_count, render, working
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -18,15 +18,15 @@ LIST_COLUMNS = ["id", "name", "role", "number", "email", "archived"]
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Nur Kunden: [green]lexware contacts list --customer[/green]
+Nur Kunden: [green]lxw contacts list --customer[/green]
 
-Nur Lieferanten: [green]lexware contacts list --vendor[/green]
+Nur Lieferanten: [green]lxw contacts list --vendor[/green]
 
-Nach Name suchen: [green]lexware contacts list --name Müller[/green]
+Nach Name suchen: [green]lxw contacts list --name Müller[/green]
 
-Getrennt nach Rolle: [green]lexware contacts list --grouped[/green]
+Getrennt nach Rolle: [green]lxw contacts list --grouped[/green]
 
-Inkl. archivierte (CSV): [green]lexware --csv contacts list --all --include-archived[/green]
+Inkl. archivierte (CSV): [green]lxw --csv contacts list --all --include-archived[/green]
 """,
 )
 def list_contacts(
@@ -141,9 +141,9 @@ def get_contact(ctx: typer.Context, contact_id: str) -> None:
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Kunde aus Datei: [green]lexware contacts create --body @kunde.json[/green]
+Kunde aus Datei: [green]lxw contacts create --body @kunde.json[/green]
 
-Lieferant aus Datei: [green]lexware contacts create --body @lieferant.json[/green]
+Lieferant aus Datei: [green]lxw contacts create --body @lieferant.json[/green]
 """,
 )
 def create(

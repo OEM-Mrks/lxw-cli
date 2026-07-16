@@ -1,6 +1,6 @@
 """Modal form for creating an order confirmation (Auftrag) as draft.
 
-Pure frontend: searching and creating go through :mod:`lexware_cli.core`
+Pure frontend: searching and creating go through :mod:`lxw_cli.core`
 services, blocking calls run in worker threads (same pattern as the main app).
 While a search or the create call runs, the affected widgets show Textual's
 loading animation so the UI never looks frozen. The screen dismisses with the
@@ -19,9 +19,9 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Static, TextArea
 
-from lexware_cli.core import services
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.tui.entities import contact_row
+from lxw_cli.core import services
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.tui.entities import contact_row
 
 SEARCH_LIMIT = 15
 

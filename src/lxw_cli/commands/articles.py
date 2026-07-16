@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import typer
 
-from lexware_cli.commands._common import load_json_arg, state
-from lexware_cli.core import services
-from lexware_cli.output import print_count, render, working
+from lxw_cli.commands._common import load_json_arg, state
+from lxw_cli.core import services
+from lxw_cli.output import print_count, render, working
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -16,13 +16,13 @@ LIST_COLUMNS = ["id", "type", "title", "articleNumber", "gtin", "unitName"]
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Volltextsuche nach Bezeichnung: [green]lexware articles list --search schraube[/green]
+Volltextsuche nach Bezeichnung: [green]lxw articles list --search schraube[/green]
 
-Teil-Artikelnummer: [green]lexware articles list -q SCH-[/green]
+Teil-Artikelnummer: [green]lxw articles list -q SCH-[/green]
 
-Exakte Artikelnummer (schnell): [green]lexware articles list --number SCH-001[/green]
+Exakte Artikelnummer (schnell): [green]lxw articles list --number SCH-001[/green]
 
-Nur Dienstleistungen, alle: [green]lexware articles list --type service --all[/green]
+Nur Dienstleistungen, alle: [green]lxw articles list --type service --all[/green]
 """,
 )
 def list_articles(
@@ -88,9 +88,9 @@ def get_article(ctx: typer.Context, article_id: str) -> None:
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Aus Datei: [green]lexware articles create --body @artikel.json[/green]
+Aus Datei: [green]lxw articles create --body @artikel.json[/green]
 
-Inline-Minimal: [green]lexware articles create --body '{"type":"SERVICE","title":"…"}'[/green]
+Inline-Minimal: [green]lxw articles create --body '{"type":"SERVICE","title":"…"}'[/green]
 """,
 )
 def create(

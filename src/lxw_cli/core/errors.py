@@ -1,5 +1,5 @@
 class LexwareError(Exception):
-    """Base exception for all lexware-cli errors."""
+    """Base exception for all lxw-cli errors."""
 
 
 class ConfigError(LexwareError):

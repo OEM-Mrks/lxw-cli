@@ -4,10 +4,10 @@ from pathlib import Path
 
 import typer
 
-from lexware_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
-from lexware_cli.core import services
-from lexware_cli.core.constants import DEFAULT_VOUCHER_STATUSES
-from lexware_cli.output import print_count, render, working, write_binary
+from lxw_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
+from lxw_cli.core import services
+from lxw_cli.core.constants import DEFAULT_VOUCHER_STATUSES
+from lxw_cli.output import print_count, render, working, write_binary
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -27,11 +27,11 @@ LIST_COLUMNS = [
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Offene Angebote: [green]lexware quotations list --status open[/green]
+Offene Angebote: [green]lxw quotations list --status open[/green]
 
-Alle als CSV: [green]lexware --csv -o angebote.csv quotations list --all[/green]
+Alle als CSV: [green]lxw --csv -o angebote.csv quotations list --all[/green]
 
-Inkl. archivierte: [green]lexware quotations list --include-archived[/green]
+Inkl. archivierte: [green]lxw quotations list --include-archived[/green]
 """,
 )
 def list_quotations(

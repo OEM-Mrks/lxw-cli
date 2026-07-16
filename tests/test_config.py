@@ -6,8 +6,8 @@ import httpx
 import pytest
 import respx
 
-import lexware_cli.config as config_mod
-from lexware_cli.config import (
+import lxw_cli.config as config_mod
+from lxw_cli.config import (
     Config,
     config_dir,
     global_env_path,

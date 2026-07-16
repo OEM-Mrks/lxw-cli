@@ -6,8 +6,8 @@ from pathlib import Path
 
 import typer
 
-from lexware_cli import __version__
-from lexware_cli.commands import (
+from lxw_cli import __version__
+from lxw_cli.commands import (
     articles,
     contacts,
     delivery_notes,
@@ -16,23 +16,23 @@ from lexware_cli.commands import (
     quotations,
     vouchers,
 )
-from lexware_cli.commands import (
+from lxw_cli.commands import (
     mcp as mcp_cmd,
 )
-from lexware_cli.config import load_config_interactive
-from lexware_cli.core import services
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.core.errors import LexwareAPIError, LexwareError
-from lexware_cli.output import OutputFormat, err_console, render, working
+from lxw_cli.config import load_config_interactive
+from lxw_cli.core import services
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.core.errors import LexwareAPIError, LexwareError
+from lxw_cli.output import OutputFormat, err_console, render, working
 
 app = typer.Typer(
-    name="lexware",
+    name="lxw",
     help=(
         "CLI für die Lexware Office API (https://developers.lexware.io/).\n\n"
         "Liest Rechnungen, Kontakte, Belege, Artikel, Angebote und Lieferscheine "
         "und legt Drafts/Stammdaten an. Globale Ausgabe-Optionen (--json, --csv, "
         "--output) stehen vor dem Befehl; Detailhilfe je Befehl mit "
-        "'lexware <befehl> <unterbefehl> --help'."
+        "'lxw <befehl> <unterbefehl> --help'."
     ),
     no_args_is_help=True,
     rich_markup_mode="rich",
@@ -40,15 +40,15 @@ app = typer.Typer(
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Auth-Test (Firmenprofil): [green]lexware profile[/green]
+Auth-Test (Firmenprofil): [green]lxw profile[/green]
 
-Offene Rechnungen: [green]lexware invoices list --status open[/green]
+Offene Rechnungen: [green]lxw invoices list --status open[/green]
 
-Artikel suchen: [green]lexware articles list --search schraube[/green]
+Artikel suchen: [green]lxw articles list --search schraube[/green]
 
-Kunden als CSV: [green]lexware --csv -o kunden.csv contacts list --customer --all[/green]
+Kunden als CSV: [green]lxw --csv -o kunden.csv contacts list --customer --all[/green]
 
-Claude-Integration einrichten: [green]lexware mcp install-claude[/green]
+Claude-Integration einrichten: [green]lxw mcp install-claude[/green]
 """,
 )
 
@@ -77,7 +77,7 @@ class AppState:
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"lexware-cli {__version__}")
+        typer.echo(f"lxw-cli {__version__}")
         raise typer.Exit()
 
 
@@ -173,7 +173,7 @@ app.add_typer(mcp_cmd.app, name="mcp", help="MCP-Server-Integration für Claude.
 
 
 def _wants_tui(argv: list[str], *, stdin_tty: bool, stdout_tty: bool) -> bool:
-    """Decide whether the bare `lexware` invocation should open the TUI.
+    """Decide whether the bare `lxw` invocation should open the TUI.
 
     Only when there are no subcommands/arguments AND we're on a real interactive
     terminal (both stdin and stdout). With arguments it's the CLI; when stdout
@@ -187,7 +187,7 @@ def _run() -> None:  # pragma: no cover
     if _wants_tui(
         sys.argv, stdin_tty=sys.stdin.isatty(), stdout_tty=sys.stdout.isatty()
     ):
-        from lexware_cli.tui.app import run as run_tui
+        from lxw_cli.tui.app import run as run_tui
 
         run_tui()
         return

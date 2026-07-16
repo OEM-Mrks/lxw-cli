@@ -3,8 +3,8 @@ from __future__ import annotations
 import httpx
 import respx
 
-from lexware_cli.core import services
-from lexware_cli.core.client import LexwareClient
+from lxw_cli.core import services
+from lxw_cli.core.client import LexwareClient
 
 _PROFILE = "https://api.lexware.io/v1/profile"
 _VOUCHERLIST = "https://api.lexware.io/v1/voucherlist"

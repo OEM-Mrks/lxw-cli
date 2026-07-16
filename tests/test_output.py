@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from lexware_cli.core.errors import LexwareError
-from lexware_cli.output import OutputFormat, print_count, render, working, write_binary
+from lxw_cli.core.errors import LexwareError
+from lxw_cli.output import OutputFormat, print_count, render, working, write_binary
 
 
 def test_print_count_capped(capsys) -> None:
@@ -92,7 +92,7 @@ def test_write_binary_none_uses_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_safe_filename_neutralizes_traversal() -> None:
-    from lexware_cli.output import safe_filename
+    from lxw_cli.output import safe_filename
 
     assert safe_filename("invoice-../../etc/x.pdf") == "invoice-.._.._etc_x.pdf"
     assert safe_filename("..\\evil.pdf") == "_evil.pdf"

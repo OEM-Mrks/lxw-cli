@@ -1,6 +1,6 @@
 """CLI glue shared by the command modules.
 
-The UI-agnostic logic lives in :mod:`lexware_cli.core`. This module keeps only
+The UI-agnostic logic lives in :mod:`lxw_cli.core`. This module keeps only
 the Typer-coupled helpers (``state``, ``load_json_arg``) and the archived-footer
 display string.
 """
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 if TYPE_CHECKING:
-    from lexware_cli.cli import AppState
+    from lxw_cli.cli import AppState
 
 # Footer hint shown when archived records are filtered out by default.
 ARCHIVED_HINT = "ohne archivierte (--include-archived zeigt alle)"

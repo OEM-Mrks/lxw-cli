@@ -1,4 +1,4 @@
-"""Subcommand `lexware mcp …` — manages Claude Code/Desktop integration."""
+"""Subcommand `lxw mcp …` — manages Claude Code/Desktop integration."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from pathlib import Path
 import typer
 from dotenv import dotenv_values
 
-from lexware_cli.config import ENV_KEY, global_env_path, load_config, store_key
-from lexware_cli.output import console, err_console
+from lxw_cli.config import ENV_KEY, global_env_path, load_config, store_key
+from lxw_cli.output import console, err_console
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -30,19 +30,19 @@ def _check_claude() -> None:
 def _mcp_command() -> list[str]:
     """Build the command Claude will use to launch the MCP server.
 
-    Prefer the `lexware-mcp` console script when it's on PATH (works for
+    Prefer the `lxw-mcp` console script when it's on PATH (works for
     pipx-installed setups). Otherwise fall back to the current interpreter
-    plus `-m lexware_cli.mcp_server` so the venv path is captured even when
+    plus `-m lxw_cli.mcp_server` so the venv path is captured even when
     `.venv/bin` isn't on the system PATH.
     """
-    on_path = shutil.which("lexware-mcp")
+    on_path = shutil.which("lxw-mcp")
     if on_path:
         return [on_path]
     # Look for the entry-point next to the running python (typical venv layout)
-    candidate = Path(sys.executable).parent / "lexware-mcp"
+    candidate = Path(sys.executable).parent / "lxw-mcp"
     if candidate.exists():
         return [str(candidate)]
-    return [sys.executable, "-m", "lexware_cli.mcp_server"]
+    return [sys.executable, "-m", "lxw_cli.mcp_server"]
 
 
 def _ensure_global_key(api_key: str) -> None:
@@ -138,7 +138,7 @@ def uninstall_claude(
 
 @app.command("status")
 def status() -> None:
-    """Zeigt, ob `lexware` aktuell bei Claude Code registriert ist."""
+    """Zeigt, ob der Lexware-MCP-Server aktuell bei Claude Code registriert ist."""
     _check_claude()
     result = subprocess.run(
         ["claude", "mcp", "list"], capture_output=True, text=True
@@ -153,13 +153,13 @@ def status() -> None:
     else:
         console.print(
             "[yellow]✗[/yellow] Lexware ist nicht registriert. "
-            "Setup: [bold]lexware mcp install-claude[/bold]"
+            "Setup: [bold]lxw mcp install-claude[/bold]"
         )
 
 
 @app.command("serve")
 def serve() -> None:
     """Startet den MCP-Server (intern von Claude Code aufgerufen — selten manuell nötig)."""
-    from lexware_cli.mcp_server import run as run_server
+    from lxw_cli.mcp_server import run as run_server
 
     run_server()

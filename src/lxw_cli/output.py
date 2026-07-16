@@ -14,7 +14,7 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from lexware_cli.core.errors import LexwareError
+from lxw_cli.core.errors import LexwareError
 
 console = Console()
 err_console = Console(stderr=True)

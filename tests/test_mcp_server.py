@@ -8,13 +8,13 @@ import pytest
 import respx
 from fastmcp import Client
 
-from lexware_cli.mcp_server import mcp
+from lxw_cli.mcp_server import mcp
 
 
 @pytest.fixture(autouse=True)
 def _reset_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset the module-level lazy client between tests."""
-    import lexware_cli.mcp_server as mod
+    import lxw_cli.mcp_server as mod
 
     mod._client = None
 

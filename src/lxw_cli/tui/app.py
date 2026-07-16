@@ -1,6 +1,6 @@
 """Textual TUI application — browses the Lexware data and creates order drafts.
 
-Talks only to ``lexware_cli.core`` (services/client/config). Blocking HTTP calls
+Talks only to ``lxw_cli.core`` (services/client/config). Blocking HTTP calls
 run in worker threads so the event loop stays responsive; every core error is
 surfaced as a visible notification + status line rather than swallowed. Textual
 manages the alternate screen and restores the terminal on exit and on crash.
@@ -25,17 +25,17 @@ from textual.widgets import (
     Static,
 )
 
-from lexware_cli.config import load_config_interactive
-from lexware_cli.core import services
-from lexware_cli.core.client import LexwareClient
-from lexware_cli.core.errors import LexwareError
-from lexware_cli.tui.detail import DetailScreen
-from lexware_cli.tui.entities import BROWSE_LIMIT, Entity, build_entities
-from lexware_cli.tui.order_form import OrderCreateScreen
+from lxw_cli.config import load_config_interactive
+from lxw_cli.core import services
+from lxw_cli.core.client import LexwareClient
+from lxw_cli.core.errors import LexwareError
+from lxw_cli.tui.detail import DetailScreen
+from lxw_cli.tui.entities import BROWSE_LIMIT, Entity, build_entities
+from lxw_cli.tui.order_form import OrderCreateScreen
 
 
 class LexwareTUI(App[None]):
-    TITLE = "lexware"
+    TITLE = "lxw"
 
     CSS = """
     #menu { width: 24; border-right: solid $panel; }
@@ -374,7 +374,7 @@ def _summary(entity: Entity, result: Any) -> str:
 
 
 def run() -> None:
-    """Entry point for `lexware-tui` and the no-args `lexware` auto-launch."""
+    """Entry point for `lxw-tui` and the no-args `lxw` auto-launch."""
     try:
         config = load_config_interactive()
     except LexwareError as exc:

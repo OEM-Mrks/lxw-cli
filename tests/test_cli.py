@@ -7,7 +7,7 @@ import pytest
 import respx
 from typer.testing import CliRunner
 
-from lexware_cli.cli import app
+from lxw_cli.cli import app
 
 
 @pytest.fixture
@@ -18,21 +18,21 @@ def runner() -> CliRunner:
 def test_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "lexware-cli" in result.stdout
+    assert "lxw-cli" in result.stdout
 
 
 def test_wants_tui_decision() -> None:
-    from lexware_cli.cli import _wants_tui
+    from lxw_cli.cli import _wants_tui
 
     # Bare invocation on an interactive terminal → TUI.
-    assert _wants_tui(["lexware"], stdin_tty=True, stdout_tty=True)
+    assert _wants_tui(["lxw"], stdin_tty=True, stdout_tty=True)
     assert _wants_tui([], stdin_tty=True, stdout_tty=True)
     # Any argument → CLI.
-    assert not _wants_tui(["lexware", "invoices"], stdin_tty=True, stdout_tty=True)
-    assert not _wants_tui(["lexware", "--help"], stdin_tty=True, stdout_tty=True)
+    assert not _wants_tui(["lxw", "invoices"], stdin_tty=True, stdout_tty=True)
+    assert not _wants_tui(["lxw", "--help"], stdin_tty=True, stdout_tty=True)
     # Non-interactive (piping/scripting) → CLI, never the TUI.
-    assert not _wants_tui(["lexware"], stdin_tty=True, stdout_tty=False)
-    assert not _wants_tui(["lexware"], stdin_tty=False, stdout_tty=True)
+    assert not _wants_tui(["lxw"], stdin_tty=True, stdout_tty=False)
+    assert not _wants_tui(["lxw"], stdin_tty=False, stdout_tty=True)
 
 
 def test_missing_key_errors(
@@ -56,8 +56,8 @@ def test_mcp_install_claude_keeps_key_out_of_argv(
     """The API key must never appear in `claude mcp add` process arguments."""
     import subprocess
 
-    import lexware_cli.commands.mcp as mcp_cmd_mod
-    from lexware_cli.config import global_env_path
+    import lxw_cli.commands.mcp as mcp_cmd_mod
+    from lxw_cli.config import global_env_path
 
     monkeypatch.setenv("LEXWARE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setattr(mcp_cmd_mod.shutil, "which", lambda name: f"/usr/bin/{name}")

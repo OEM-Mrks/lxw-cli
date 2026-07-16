@@ -14,9 +14,9 @@ from tenacity import (
     wait_exponential,
 )
 
-from lexware_cli import __version__
-from lexware_cli.config import Config
-from lexware_cli.core.errors import LexwareAPIError, RateLimitError
+from lxw_cli import __version__
+from lxw_cli.config import Config
+from lxw_cli.core.errors import LexwareAPIError, RateLimitError
 
 RATE_LIMIT_PER_SECOND = 2
 MIN_INTERVAL = 1.0 / RATE_LIMIT_PER_SECOND
@@ -61,7 +61,7 @@ class LexwareClient:
             headers={
                 "Authorization": f"Bearer {config.api_key}",
                 "Accept": "application/json",
-                "User-Agent": f"lexware-cli/{__version__}",
+                "User-Agent": f"lxw-cli/{__version__}",
             },
         )
 

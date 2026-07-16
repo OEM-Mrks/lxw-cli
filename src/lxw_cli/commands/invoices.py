@@ -4,10 +4,10 @@ from pathlib import Path
 
 import typer
 
-from lexware_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
-from lexware_cli.core import services
-from lexware_cli.core.constants import DEFAULT_VOUCHER_STATUSES
-from lexware_cli.output import print_count, render, working, write_binary
+from lxw_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
+from lxw_cli.core import services
+from lxw_cli.core.constants import DEFAULT_VOUCHER_STATUSES
+from lxw_cli.output import print_count, render, working, write_binary
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -27,13 +27,13 @@ LIST_COLUMNS = [
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Offene Rechnungen: [green]lexware invoices list --status open[/green]
+Offene Rechnungen: [green]lxw invoices list --status open[/green]
 
-Alle als CSV: [green]lexware --csv invoices list --all[/green]
+Alle als CSV: [green]lxw --csv invoices list --all[/green]
 
-Nach Rechnungsnummer: [green]lexware invoices list --number FB2600682[/green]
+Nach Rechnungsnummer: [green]lxw invoices list --number FB2600682[/green]
 
-Inkl. archivierte: [green]lexware invoices list --include-archived[/green]
+Inkl. archivierte: [green]lxw invoices list --include-archived[/green]
 """,
 )
 def list_invoices(
@@ -93,9 +93,9 @@ def list_invoices(
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Nach Rechnungsnummer: [green]lexware invoices get FB2600682[/green]
+Nach Rechnungsnummer: [green]lxw invoices get FB2600682[/green]
 
-Betrag via jq: [green]lexware --json invoices get FB2600682 | jq .totalGrossAmount[/green]
+Betrag via jq: [green]lxw --json invoices get FB2600682 | jq .totalGrossAmount[/green]
 """,
 )
 def get_invoice(
@@ -119,11 +119,11 @@ def get_invoice(
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Ins aktuelle Verzeichnis: [green]lexware invoices pdf FB2600682[/green]
+Ins aktuelle Verzeichnis: [green]lxw invoices pdf FB2600682[/green]
 
-In ein Verzeichnis (Auto-Name): [green]lexware invoices pdf FB2600682 -o ~/Rechnungen[/green]
+In ein Verzeichnis (Auto-Name): [green]lxw invoices pdf FB2600682 -o ~/Rechnungen[/green]
 
-Mit festem Dateinamen: [green]lexware invoices pdf FB2600682 -o rechnung.pdf[/green]
+Mit festem Dateinamen: [green]lxw invoices pdf FB2600682 -o rechnung.pdf[/green]
 """,
 )
 def download_pdf(
@@ -153,9 +153,9 @@ def download_pdf(
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]
 
-Aus einer Datei: [green]lexware invoices create-draft --body @rechnung.json[/green]
+Aus einer Datei: [green]lxw invoices create-draft --body @rechnung.json[/green]
 
-Inline: [green]lexware invoices create-draft --body '{…}'[/green]
+Inline: [green]lxw invoices create-draft --body '{…}'[/green]
 """,
 )
 def create_draft(

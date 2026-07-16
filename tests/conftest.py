@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from lexware_cli.config import Config
-from lexware_cli.core.client import LexwareClient
+from lxw_cli.config import Config
+from lxw_cli.core.client import LexwareClient
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def client(config: Config) -> LexwareClient:
 @pytest.fixture(autouse=True)
 def _fast_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable the 2 req/s rate-limit sleep during tests."""
-    import lexware_cli.core.client as client_mod
+    import lxw_cli.core.client as client_mod
 
     monkeypatch.setattr(client_mod, "MIN_INTERVAL", 0.0)
 

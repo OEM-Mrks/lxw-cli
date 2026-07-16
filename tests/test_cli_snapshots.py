@@ -20,7 +20,7 @@ import pytest
 import respx
 from typer.testing import CliRunner
 
-from lexware_cli.cli import app
+from lxw_cli.cli import app
 
 SNAP_DIR = Path(__file__).parent / "snapshots"
 
