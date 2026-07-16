@@ -62,10 +62,11 @@ lxw --version                  # Kontrolle
 ```
 
 Sieht uv eine frisch veröffentlichte Version noch nicht (das PyPI-CDN braucht
-nach einem Release ein paar Minuten), erzwingt `--refresh` den Index-Abgleich:
+nach einem Release ein paar Minuten) oder ist das Tool auf eine exakte Version
+gepinnt, hilft ein Neu-Install auf `latest`:
 
 ```bash
-uv tool upgrade --refresh lxw-cli
+uv tool install --force lxw-cli@latest
 ```
 
 Der MCP-Server für Claude nutzt das Update automatisch mit — bereits laufende
