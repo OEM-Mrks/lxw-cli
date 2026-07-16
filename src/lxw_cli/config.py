@@ -25,15 +25,21 @@ def config_dir() -> Path:
     """User-level config directory for lxw-cli.
 
     Honors `LEXWARE_CONFIG_DIR` (explicit override, mostly for tests), then
-    `XDG_CONFIG_HOME`, and finally defaults to ~/.config/lexware. This is the
-    one stable location the CLI looks at regardless of the current directory.
+    `XDG_CONFIG_HOME`, and finally defaults to ~/.config/lexware — on Windows
+    to %APPDATA%\\lexware. This is the one stable location the CLI looks at
+    regardless of the current directory.
     """
     override = os.environ.get("LEXWARE_CONFIG_DIR")
     if override:
         return Path(override).expanduser()
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    return root / "lexware"
+    if xdg:
+        return Path(xdg).expanduser() / "lexware"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return root / "lexware"
+    return Path.home() / ".config" / "lexware"
 
 
 def global_env_path() -> Path:
@@ -207,6 +213,8 @@ def store_key(api_key: str) -> Path:
     path = global_env_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # Owner-only permissions; effectively a no-op on Windows (ACLs of the
+        # user profile already restrict access there).
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
@@ -220,5 +228,8 @@ def store_key(api_key: str) -> Path:
         ]
     lines.append(f"{ENV_KEY}={api_key}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     return path

@@ -38,8 +38,10 @@ def _mcp_command() -> list[str]:
     on_path = shutil.which("lxw-mcp")
     if on_path:
         return [on_path]
-    # Look for the entry-point next to the running python (typical venv layout)
-    candidate = Path(sys.executable).parent / "lxw-mcp"
+    # Look for the entry-point next to the running python (typical venv layout;
+    # on Windows console scripts get an .exe suffix)
+    exe_suffix = ".exe" if sys.platform == "win32" else ""
+    candidate = Path(sys.executable).parent / f"lxw-mcp{exe_suffix}"
     if candidate.exists():
         return [str(candidate)]
     return [sys.executable, "-m", "lxw_cli.mcp_server"]
