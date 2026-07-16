@@ -397,6 +397,51 @@ lxw mcp uninstall-desktop         # aus Claude Desktop entfernen
 lxw mcp serve                     # läuft direkt — wird von Claude intern aufgerufen
 ```
 
+### Multi-User-Server (HTTP) — ein Server, jeder mit eigenem Key
+
+Neben dem lokalen stdio-Modus gibt es `lxw-mcp-http`: einen zentralen
+MCP-Server für mehrere Nutzer, bei dem **jeder seinen eigenen Lexware-API-Key
+mitbringt**. Der Server speichert keine Keys — er ist ein zustandsloser Proxy.
+
+```bash
+LXW_MCP_PUBLIC_URL=https://mcp.example.com \
+LXW_MCP_SECRET='ein-langes-zufaelliges-secret' \
+lxw-mcp-http    # lauscht auf 127.0.0.1:8788 (LXW_MCP_HOST/LXW_MCP_PORT)
+```
+
+Zwei Wege, den eigenen Key mitzubringen:
+
+1. **Direkt als Bearer-Header** (Claude Code, Cursor, Skripte — alles, was
+   eigene Header kann). Der Key bleibt in der lokalen Client-Config:
+
+   ```bash
+   claude mcp add lexware --transport http https://mcp.example.com/mcp \
+     --header "Authorization: Bearer ${LEXWARE_API_KEY}"
+   ```
+
+2. **OAuth** (claude.ai, ChatGPT — Clients ohne Header-Support): Beim
+   Verbinden öffnet sich eine Consent-Seite des Servers, auf der man einmalig
+   seinen Lexware-Key eingibt. Der Server prüft ihn gegen die Lexware-API und
+   stellt ein Zugriffstoken aus, in dem der Key **verschlüsselt eingebettet**
+   ist (Fernet, `LXW_MCP_SECRET`). Das Token liegt beim Client auf dem Gerät
+   des Nutzers; der Server entschlüsselt es nur pro Request und persistiert
+   ausschließlich die OAuth-Client-Registrierungen (`LXW_MCP_DATA_DIR`,
+   Standard `~/.config/lexware/mcp/`).
+
+Hinweise für den Betrieb:
+
+- `LXW_MCP_SECRET` **fest setzen** — ohne festes Secret werden alle Tokens
+  bei jedem Neustart ungültig. Rotieren des Secrets invalidiert bewusst alle
+  ausgestellten Tokens.
+- Vor den Server gehört ein HTTPS-Reverse-Proxy (Caddy, nginx, Cloudflare
+  Tunnel, `tailscale serve`, …); `LXW_MCP_PUBLIC_URL` ist die von außen
+  sichtbare Basis-URL (sie steht in den OAuth-Metadaten).
+- PDF-Downloads liefern über HTTP das PDF als Binärinhalt zurück (statt eines
+  Pfads auf der Server-Platte wie im stdio-Modus).
+- Tokens laufen nach 24 h ab; Clients erneuern sie automatisch per
+  Refresh-Token. Ein geleaktes Token wird wirkungslos, sobald der zugehörige
+  Lexware-Key unter <https://app.lexware.de/addons/public-api> widerrufen wird.
+
 ## Out of Scope (v1)
 
 Bewusst nicht enthalten:

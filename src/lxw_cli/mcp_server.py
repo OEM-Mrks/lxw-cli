@@ -2,6 +2,15 @@
 
 A thin frontend over :mod:`lxw_cli.core.services` — the exact same
 UI-agnostic operations the CLI uses, so both stay in sync by construction.
+
+Runs in two modes:
+
+- **stdio** (``lxw-mcp``): single-user, the key comes from the local
+  config exactly as for the CLI.
+- **HTTP** (``lxw-mcp-http``): multi-user. Each request brings its own
+  Lexware API key — either directly as ``Authorization: Bearer <key>``
+  or wrapped in an OAuth token issued by :mod:`lxw_cli.mcp_auth`. No
+  key is ever stored on the server.
 """
 
 from __future__ import annotations
@@ -10,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.utilities.types import File
 
 from lxw_cli.config import load_config
 from lxw_cli.core import services
@@ -21,7 +31,8 @@ mcp: FastMCP = FastMCP(
     instructions=(
         "Lexware Office API. Most document tools accept either a UUID or a "
         "voucher number (e.g. invoice number 'FB2600682'). PDF download tools "
-        "save the file to ~/Downloads/lexware/ by default and return the path. "
+        "save the file to ~/Downloads/lexware/ by default and return the path "
+        "(over HTTP they return the PDF itself). "
         "When creating documents (invoice/quotation/order confirmation/delivery "
         "note) with line items based on an article: fetch the article first and "
         "copy its `description` into the line item's optional `description` "
@@ -34,6 +45,14 @@ _client: LexwareClient | None = None
 
 
 def _client_get() -> LexwareClient:
+    # Multi-user HTTP mode: the authenticated request carries the user's
+    # own key; each key gets its own (cached) client.
+    from lxw_cli.mcp_auth import pool, request_api_key
+
+    api_key = request_api_key()
+    if api_key is not None:
+        return pool.get(api_key)
+    # stdio mode: single user, key from the local config.
     global _client
     if _client is None:
         _client = LexwareClient(load_config())
@@ -46,7 +65,26 @@ def _default_download_dir() -> Path:
     return target
 
 
-def _save_pdf(data: bytes, output_dir: str | None, filename: str) -> str:
+def _in_http_request() -> bool:
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        return get_http_request() is not None
+    except Exception:  # noqa: BLE001 — outside any HTTP context
+        return False
+
+
+def _pdf_result(data: bytes, output_dir: str | None, filename: str) -> str | File:
+    """Local stdio: save to disk and return the path (as documented).
+
+    Over HTTP the server's filesystem is useless to the caller, so the
+    PDF is returned inline as a binary resource instead.
+    """
+    if _in_http_request():
+        # File appends the format as extension to the synthetic resource URI;
+        # strip a trailing .pdf from the name so it isn't doubled (foo.pdf.pdf).
+        stem = safe_filename(filename).removesuffix(".pdf")
+        return File(data=data, name=stem, format="pdf")
     target_dir = Path(output_dir).expanduser() if output_dir else _default_download_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     # filename embeds the caller-supplied identifier — sanitize so it can
@@ -101,14 +139,16 @@ def get_invoice(identifier: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def download_invoice_pdf(identifier: str, output_dir: str | None = None) -> str:
+def download_invoice_pdf(identifier: str, output_dir: str | None = None) -> str | File:
     """Download an invoice PDF. Accepts UUID or invoice number.
 
-    Saves to ~/Downloads/lexware/ by default and returns the absolute file path.
+    Over stdio the PDF is saved to ~/Downloads/lexware/ (or output_dir) and the
+    absolute path is returned. Over HTTP the PDF is returned inline as binary
+    content and output_dir is ignored (the server's disk isn't the caller's).
     Note: drafts cannot be downloaded — the API requires a finalized status.
     """
     data = services.download_invoice_pdf(_client_get(), identifier)
-    return _save_pdf(data, output_dir, f"invoice-{identifier}.pdf")
+    return _pdf_result(data, output_dir, f"invoice-{identifier}.pdf")
 
 
 @mcp.tool
@@ -239,10 +279,13 @@ def get_quotation(identifier: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def download_quotation_pdf(identifier: str, output_dir: str | None = None) -> str:
-    """Download a quotation PDF. Returns the saved file path."""
+def download_quotation_pdf(identifier: str, output_dir: str | None = None) -> str | File:
+    """Download a quotation PDF.
+
+    stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
+    """
     data = services.download_quotation_pdf(_client_get(), identifier)
-    return _save_pdf(data, output_dir, f"quotation-{identifier}.pdf")
+    return _pdf_result(data, output_dir, f"quotation-{identifier}.pdf")
 
 
 @mcp.tool
@@ -273,10 +316,10 @@ def get_order_confirmation(identifier: str) -> dict[str, Any]:
 @mcp.tool
 def download_order_confirmation_pdf(
     identifier: str, output_dir: str | None = None
-) -> str:
+) -> str | File:
     """Download an order confirmation PDF. Returns the saved file path."""
     data = services.download_order_confirmation_pdf(_client_get(), identifier)
-    return _save_pdf(data, output_dir, f"order-{identifier}.pdf")
+    return _pdf_result(data, output_dir, f"order-{identifier}.pdf")
 
 
 @mcp.tool
@@ -305,10 +348,13 @@ def get_delivery_note(identifier: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def download_delivery_note_pdf(identifier: str, output_dir: str | None = None) -> str:
-    """Download a delivery note PDF. Returns the saved file path."""
+def download_delivery_note_pdf(identifier: str, output_dir: str | None = None) -> str | File:
+    """Download a delivery note PDF.
+
+    stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
+    """
     data = services.download_delivery_note_pdf(_client_get(), identifier)
-    return _save_pdf(data, output_dir, f"deliverynote-{identifier}.pdf")
+    return _pdf_result(data, output_dir, f"deliverynote-{identifier}.pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +432,49 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
 def run() -> None:
     """Entry point for `lxw-mcp` — runs the MCP server over stdio."""
     mcp.run()
+
+
+def run_http() -> None:
+    """Entry point for `lxw-mcp-http` — multi-user server over HTTP.
+
+    Environment:
+        LXW_MCP_PUBLIC_URL  public base URL (behind the reverse proxy),
+                            e.g. https://mcp.example.com — used for the
+                            OAuth metadata and the consent redirect.
+        LXW_MCP_SECRET      token-sealing secret. Any random string works;
+                            without it a fresh one is generated per start
+                            and all previously issued tokens stop working.
+        LXW_MCP_HOST/PORT   bind address (default 127.0.0.1:8788).
+        LXW_MCP_DATA_DIR    where OAuth client registrations live
+                            (default: <config dir>/mcp).
+    """
+    import os
+    import secrets
+    import sys
+
+    from lxw_cli.mcp_auth import (
+        ENV_HOST,
+        ENV_PORT,
+        ENV_PUBLIC_URL,
+        ENV_SECRET,
+        LexwareOAuthProvider,
+    )
+
+    host = os.environ.get(ENV_HOST, "127.0.0.1")
+    port = int(os.environ.get(ENV_PORT, "8788"))
+    public_url = os.environ.get(ENV_PUBLIC_URL, f"http://{host}:{port}")
+    secret = os.environ.get(ENV_SECRET, "")
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        print(
+            f"Warnung: {ENV_SECRET} ist nicht gesetzt — es wurde ein flüchtiges "
+            "Secret erzeugt. Alle ausgestellten Tokens werden beim nächsten "
+            "Neustart ungültig. Für den Dauerbetrieb ein festes Secret setzen.",
+            file=sys.stderr,
+        )
+
+    mcp.auth = LexwareOAuthProvider(public_url=public_url, secret=secret)
+    mcp.run(transport="http", host=host, port=port)
 
 
 if __name__ == "__main__":

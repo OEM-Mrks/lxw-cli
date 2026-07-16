@@ -132,7 +132,9 @@ async def test_download_invoice_pdf_saves_to_path(tmp_path: Path) -> None:
             "download_invoice_pdf",
             {"identifier": uuid, "output_dir": str(tmp_path)},
         )
-    saved_path = Path(result.data)
+    # Return type is `str | File` (File over HTTP), so the path arrives as
+    # text content rather than structured data.
+    saved_path = Path(result.content[0].text)
     assert saved_path.exists()
     assert saved_path.read_bytes().startswith(b"%PDF")
     assert saved_path.parent == tmp_path

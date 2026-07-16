@@ -30,6 +30,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "fastmcp>=2.10",
     "textual>=0.58",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +45,7 @@ dev = [
 [project.scripts]
 lxw = "lxw_cli.cli:_run"
 lxw-mcp = "lxw_cli.mcp_server:run"
+lxw-mcp-http = "lxw_cli.mcp_server:run_http"
 lxw-tui = "lxw_cli.tui.app:run"
 
 [project.urls]
