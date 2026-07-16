@@ -21,7 +21,12 @@ mcp: FastMCP = FastMCP(
     instructions=(
         "Lexware Office API. Most document tools accept either a UUID or a "
         "voucher number (e.g. invoice number 'FB2600682'). PDF download tools "
-        "save the file to ~/Downloads/lexware/ by default and return the path."
+        "save the file to ~/Downloads/lexware/ by default and return the path. "
+        "When creating documents (invoice/quotation/order confirmation/delivery "
+        "note) with line items based on an article: fetch the article first and "
+        "copy its `description` into the line item's optional `description` "
+        "field — otherwise the article description is missing on the printed "
+        "document."
     ),
 )
 
@@ -314,7 +319,12 @@ def download_delivery_note_pdf(identifier: str, output_dir: str | None = None) -
 
 @mcp.tool
 def create_invoice_draft(body: dict[str, Any]) -> dict[str, Any]:
-    """Create an invoice as draft. See https://developers.lexware.io/docs/ for body schema."""
+    """Create an invoice as draft. See https://developers.lexware.io/docs/ for body schema.
+
+    Line items support an optional `description` (long text shown under the
+    position name on the PDF). When a line item is based on an article, copy
+    the article's `description` into it.
+    """
     return services.create_invoice(_client_get(), body)
 
 
@@ -342,19 +352,34 @@ def create_article(body: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool
 def create_quotation_draft(body: dict[str, Any]) -> dict[str, Any]:
-    """Create a quotation as draft."""
+    """Create a quotation as draft.
+
+    Line items support an optional `description` (long text shown under the
+    position name on the PDF). When a line item is based on an article, copy
+    the article's `description` into it.
+    """
     return services.create_quotation(_client_get(), body)
 
 
 @mcp.tool
 def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
-    """Create an order confirmation (Auftrag) as draft."""
+    """Create an order confirmation (Auftrag) as draft.
+
+    Line items support an optional `description` (long text shown under the
+    position name on the PDF). When a line item is based on an article, copy
+    the article's `description` into it.
+    """
     return services.create_order_confirmation(_client_get(), body)
 
 
 @mcp.tool
 def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
-    """Create a delivery note as draft."""
+    """Create a delivery note as draft.
+
+    Line items support an optional `description` (long text shown under the
+    position name on the PDF). When a line item is based on an article, copy
+    the article's `description` into it.
+    """
     return services.create_delivery_note(_client_get(), body)
 
 

@@ -403,15 +403,15 @@ def article_line_item(
 ) -> dict[str, Any]:
     """Build a `custom` line item from a raw article record.
 
-    The Public API has no article-referencing line-item type, so name, unit and
-    price are copied from the article. Prices are always sent net (the article
-    record carries `netPrice` regardless of its leading price), which pairs
-    with `taxConditions.taxType = "net"` in the document body. `net_price`
-    overrides the article's list price (e.g. a manually edited price in the
-    TUI form).
+    The Public API has no article-referencing line-item type, so name,
+    description, unit and price are copied from the article. Prices are always
+    sent net (the article record carries `netPrice` regardless of its leading
+    price), which pairs with `taxConditions.taxType = "net"` in the document
+    body. `net_price` overrides the article's list price (e.g. a manually
+    edited price in the TUI form).
     """
     price = article.get("price") or {}
-    return {
+    item = {
         "type": "custom",
         "name": article.get("title") or article.get("articleNumber") or "Position",
         "quantity": quantity,
@@ -422,6 +422,10 @@ def article_line_item(
             "taxRatePercentage": price.get("taxRate", 19),
         },
     }
+    description = (article.get("description") or "").strip()
+    if description:
+        item["description"] = description
+    return item
 
 
 def build_order_confirmation_body(
