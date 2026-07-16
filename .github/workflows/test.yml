@@ -24,8 +24,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        # --clear: setup-uv legt je nach Plattform bereits ein .venv an
         run: |
-          uv venv
+          uv venv --clear
           uv pip install -e ".[dev]"
 
       - name: Ruff
