@@ -39,7 +39,7 @@ pip install lxw-cli
 ### Aus dem Quellcode (Entwicklung)
 
 ```bash
-git clone https://github.com/markusoeffling/lxw-cli
+git clone https://github.com/OEM-Mrks/lxw-cli
 cd lxw-cli
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
