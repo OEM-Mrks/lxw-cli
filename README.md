@@ -36,6 +36,22 @@ Alternativ klassisch in ein Environment:
 pip install lxw-cli
 ```
 
+### Windows (cmd, ohne Vorinstallation)
+
+Für ein frisches Windows 11 ohne uv und ohne Python — die vier Zeilen laufen
+per Copy-Paste in `cmd.exe` durch (volle Pfade, damit kein Terminal-Neustart
+nötig ist; uv lädt sich ein passendes Python selbst):
+
+```cmd
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+"%USERPROFILE%\.local\bin\uv.exe" tool install lxw-cli
+"%USERPROFILE%\.local\bin\uv.exe" tool update-shell
+"%USERPROFILE%\.local\bin\lxw.exe" profile
+```
+
+Ab dem nächsten cmd-Fenster reicht dann überall einfach `lxw`. Der API-Key
+wird beim ersten Start abgefragt und unter `%APPDATA%\lexware\.env` gespeichert.
+
 ### Aus dem Quellcode (Entwicklung)
 
 ```bash
