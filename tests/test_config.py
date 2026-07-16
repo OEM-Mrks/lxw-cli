@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import sys
 
 import httpx
 import pytest
@@ -58,8 +59,10 @@ def test_prompt_validates_and_persists_key(monkeypatch: pytest.MonkeyPatch) -> N
     env_file = global_env_path()
     assert env_file.is_file()
     assert "LEXWARE_API_KEY=pasted-key" in env_file.read_text(encoding="utf-8")
-    # Owner-only permissions on the file holding the secret.
-    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    # Owner-only permissions on the file holding the secret (POSIX only —
+    # Windows has no meaningful chmod; the user profile's ACLs apply there).
+    if sys.platform != "win32":
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
 
 
 @respx.mock
