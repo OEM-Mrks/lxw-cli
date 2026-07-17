@@ -1,109 +1,57 @@
-"""Forward non-binding feature requests to the vendor by email.
+"""Compose a non-binding feature request for the user to send to the vendor.
 
 This is an **end-customer product**: the assistant must not offer to build or
 extend the software itself. When a user wants functionality the tools don't
-cover, the ``request_feature`` MCP tool routes a short, non-binding wish to the
-vendor (oemedia) via SMTP. No promise is made about if or when it is built.
-
-SMTP is configured entirely through environment variables so no mail
-credentials live in code. If SMTP is not configured, the tool fails with a
-clear message rather than silently dropping the request.
+cover, the ``request_feature`` MCP tool returns a ready-to-send message (subject
++ body) and the vendor's address (oemedia) — the user copies it and sends the
+email themselves. The server does **not** send any mail. No promise is made
+about whether or when the feature is built.
 """
 
 from __future__ import annotations
-
-import os
-import smtplib
-import ssl
-from datetime import datetime
-from email.message import EmailMessage
-
-ENV_SMTP_HOST = "LXW_MCP_SMTP_HOST"
-ENV_SMTP_PORT = "LXW_MCP_SMTP_PORT"  # default 587
-ENV_SMTP_USER = "LXW_MCP_SMTP_USER"
-ENV_SMTP_PASSWORD = "LXW_MCP_SMTP_PASSWORD"
-ENV_SMTP_STARTTLS = "LXW_MCP_SMTP_STARTTLS"  # "true" (default) / "false"
-ENV_FEATURE_TO = "LXW_MCP_FEATURE_TO"  # default DEFAULT_TO
-ENV_FEATURE_FROM = "LXW_MCP_FEATURE_FROM"  # default: SMTP user
 
 DEFAULT_TO = "david@oemedia.de"
 SUBJECT = "Lexware-MCP — Funktionsanfrage (unverbindlich)"
 
 
 class FeatureRequestError(Exception):
-    """Raised when a feature request cannot be sent."""
+    """Raised when a feature request cannot be composed."""
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in ("0", "false", "no", "nein", "off")
-
-
-def send_feature_request(
+def compose_feature_request(
     *,
     description: str,
     company: str | None = None,
     contact_email: str | None = None,
-    now: datetime | None = None,
 ) -> dict[str, str]:
-    """Send one feature request email. Returns a small status dict.
+    """Build a copy-paste-ready feature request. Sends nothing.
 
-    Raises :class:`FeatureRequestError` on empty input or missing/failing SMTP.
+    Returns ``{to, subject, body, hinweis}``. Raises
+    :class:`FeatureRequestError` on empty input.
     """
     text = (description or "").strip()
     if not text:
         raise FeatureRequestError("Bitte den gewünschten Funktionswunsch beschreiben.")
 
-    host = os.getenv(ENV_SMTP_HOST, "").strip()
-    user = os.getenv(ENV_SMTP_USER, "").strip()
-    password = os.getenv(ENV_SMTP_PASSWORD, "")
-    if not host or not user or not password:
-        raise FeatureRequestError(
-            "Funktionsanfragen sind auf diesem Server nicht konfiguriert "
-            "(SMTP fehlt). Bitte den Wunsch direkt an " + DEFAULT_TO + " senden."
-        )
-    port = int(os.getenv(ENV_SMTP_PORT, "587"))
-    to_addr = os.getenv(ENV_FEATURE_TO, "").strip() or DEFAULT_TO
-    from_addr = os.getenv(ENV_FEATURE_FROM, "").strip() or user
-    stamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M")
-
+    subject = SUBJECT + (f" — {company}" if company else "")
     lines = [
-        "Unverbindliche Funktionsanfrage über den Lexware-MCP-Server.",
+        "Unverbindliche Funktionsanfrage zum Lexware-MCP-Tool.",
         "",
-        f"Kunde:        {company or 'unbekannt'}",
-        f"Kontakt-Mail: {contact_email or '(nicht angegeben)'}",
-        f"Zeitpunkt:    {stamp}",
+        f"Kunde:        {company or '(bitte ergänzen)'}",
+        f"Kontakt-Mail: {contact_email or '(bitte ergänzen)'}",
         "",
         "Wunsch:",
         text,
         "",
-        "— Diese Nachricht wurde automatisch erzeugt. Sie ist unverbindlich und",
-        "  stellt keine Zusage zur Umsetzung dar.",
+        "Hinweis: unverbindlich, keine Zusage zur Umsetzung.",
     ]
-    msg = EmailMessage()
-    msg["Subject"] = SUBJECT + (f" — {company}" if company else "")
-    msg["From"] = from_addr
-    msg["To"] = to_addr
-    if contact_email:
-        msg["Reply-To"] = contact_email
-    msg.set_content("\n".join(lines))
-
-    try:
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
-                s.login(user, password)
-                s.send_message(msg)
-        else:
-            with smtplib.SMTP(host, port) as s:
-                if _bool_env(ENV_SMTP_STARTTLS, True):
-                    s.starttls(context=ssl.create_default_context())
-                s.login(user, password)
-                s.send_message(msg)
-    except (smtplib.SMTPException, OSError) as exc:
-        raise FeatureRequestError(
-            f"Die Funktionsanfrage konnte nicht per E-Mail versendet werden ({exc})."
-        ) from exc
-
-    return {"status": "sent", "to": to_addr}
+    return {
+        "to": DEFAULT_TO,
+        "subject": subject,
+        "body": "\n".join(lines),
+        "hinweis": (
+            "Dies ist ein unverbindlicher Funktionswunsch. Bitte den obigen Text "
+            f"per E-Mail an {DEFAULT_TO} senden — der Server verschickt nichts "
+            "selbst."
+        ),
+    }

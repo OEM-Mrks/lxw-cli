@@ -24,7 +24,7 @@ from fastmcp.utilities.types import File
 from lxw_cli.config import load_config
 from lxw_cli.core import services
 from lxw_cli.core.client import LexwareClient
-from lxw_cli.feature_request import send_feature_request
+from lxw_cli.feature_request import compose_feature_request
 from lxw_cli.output import safe_filename
 
 mcp: FastMCP = FastMCP(
@@ -43,9 +43,9 @@ mcp: FastMCP = FastMCP(
         "offer to develop, extend, change, or 'quickly add' functionality "
         "yourself, and do not speculate about building features — the tools "
         "listed here are the full scope. If the user wants functionality that "
-        "these tools do not provide, do not promise it: instead offer to "
-        "forward a non-binding feature request to the vendor via the "
-        "`request_feature` tool (only after the user agrees)."
+        "these tools do not provide, do not promise it: instead use the "
+        "`request_feature` tool to compose a non-binding request and present "
+        "the returned message to the user to email to the vendor themselves."
     ),
 )
 
@@ -438,23 +438,23 @@ def update_article(article_id: str, changes: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool
 def request_feature(description: str, contact_email: str | None = None) -> dict[str, str]:
-    """Forward a NON-BINDING feature request / wish to the vendor (oemedia) by email.
+    """Compose a NON-BINDING feature request for the vendor (oemedia) to copy & send.
 
     Use this ONLY when the user wants functionality that the tools here do not
-    provide, and ONLY after the user has agreed to send it. This is an
-    end-customer product — you do not build features yourself; this tool simply
-    passes the wish to the vendor. It makes no promise about whether or when the
-    feature will be implemented. Summarize the user's wish clearly in
-    `description` (German is fine). `contact_email` is optional and lets the
-    vendor reply to the requester.
+    provide. This is an end-customer product — you do not build features
+    yourself. The tool does NOT send anything: it returns a ready-to-send
+    message (`subject`, `body`) and the vendor address (`to`). Present that to
+    the user so they can email it themselves; it is non-binding and makes no
+    promise about if or when the feature is built. Summarize the wish clearly in
+    `description` (German is fine); `contact_email` is optional.
     """
     company: str | None = None
     try:
         profile = services.get_profile(_client_get())
         company = profile.get("companyName") or profile.get("organizationId")
-    except Exception:  # noqa: BLE001 — the request is still worth sending
+    except Exception:  # noqa: BLE001 — composing the request is still useful
         company = None
-    return send_feature_request(
+    return compose_feature_request(
         description=description, company=company, contact_email=contact_email
     )
 
