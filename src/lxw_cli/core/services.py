@@ -554,6 +554,22 @@ def create_contact(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any
     return client.post("/v1/contacts", body)
 
 
+def update_contact(
+    client: LexwareClient, contact_id: str, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Partially update a contact: fetch, deep-merge, PUT the full object.
+
+    Lexware's PUT replaces the whole contact and requires the current
+    ``version`` (optimistic locking). We therefore always fetch the live
+    contact first, merge the caller's ``changes`` onto it, and force the
+    just-fetched version — so the caller only ever supplies the fields that
+    change and can never break the version handshake.
+    """
+    current = client.get(f"/v1/contacts/{contact_id}")
+    merged = _merge_for_update(current, changes)
+    return client.put(f"/v1/contacts/{contact_id}", merged)
+
+
 # -- Articles ---------------------------------------------------------------
 
 
@@ -600,3 +616,36 @@ def get_article(client: LexwareClient, article_id: str) -> dict[str, Any]:
 
 def create_article(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
     return client.post("/v1/articles", body)
+
+
+def update_article(
+    client: LexwareClient, article_id: str, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Partially update an article — same fetch/deep-merge/PUT flow as
+    :func:`update_contact` (articles also use ``version`` locking)."""
+    current = client.get(f"/v1/articles/{article_id}")
+    merged = _merge_for_update(current, changes)
+    return client.put(f"/v1/articles/{article_id}", merged)
+
+
+def _merge_for_update(current: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge ``changes`` onto a freshly fetched resource for a PUT.
+
+    Nested objects merge key-by-key; lists and scalars are replaced wholesale
+    (a list can't be meaningfully half-merged — pass the full list to change
+    one entry). The resource's own ``version`` always wins, so a caller who
+    echoes a stale version in ``changes`` can't trigger a false 409.
+    """
+    merged = _deep_merge(current, changes)
+    if "version" in current:
+        merged["version"] = current["version"]
+    return merged
+
+
+def _deep_merge(base: Any, changes: Any) -> Any:
+    if isinstance(base, dict) and isinstance(changes, dict):
+        out = dict(base)
+        for key, value in changes.items():
+            out[key] = _deep_merge(base[key], value) if key in base else value
+        return out
+    return changes

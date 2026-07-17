@@ -29,6 +29,8 @@ async def test_tools_are_registered() -> None:
         assert "get_invoice" in names
         assert "download_invoice_pdf" in names
         assert "create_contact" in names
+        assert "update_contact" in names
+        assert "update_article" in names
 
 
 @respx.mock

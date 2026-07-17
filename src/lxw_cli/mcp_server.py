@@ -385,6 +385,25 @@ def create_contact(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool
+def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    """Update an existing contact by UUID — pass only the fields to change.
+
+    The server fetches the current contact, deep-merges `changes` onto it,
+    carries the current `version` automatically (Lexware optimistic locking),
+    and saves — so you never fetch/version-juggle yourself. Nested objects
+    merge key-by-key; lists are REPLACED wholesale, so to change one entry of
+    a list send the full list.
+    Examples:
+      rename company:      {"company": {"name": "Neuer Name GmbH"}}
+      change business mail:{"emailAddresses": {"business": ["neu@example.com"]}}
+      change billing addr: {"addresses": {"billing": [{"street": "Weg 1",
+                            "zip": "50667", "city": "Köln", "countryCode": "DE"}]}}
+    Note: `archived` is read-only in the Lexware API and cannot be changed here.
+    """
+    return services.update_contact(_client_get(), contact_id, changes)
+
+
+@mcp.tool
 def create_voucher_draft(body: dict[str, Any]) -> dict[str, Any]:
     """Create a generic voucher (for bookkeeping / purchase invoices)."""
     return services.create_voucher(_client_get(), body)
@@ -394,6 +413,19 @@ def create_voucher_draft(body: dict[str, Any]) -> dict[str, Any]:
 def create_article(body: dict[str, Any]) -> dict[str, Any]:
     """Create a new article (product or service — master data, not a draft)."""
     return services.create_article(_client_get(), body)
+
+
+@mcp.tool
+def update_article(article_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    """Update an existing article by UUID — pass only the fields to change.
+
+    Same partial-merge + automatic `version` handling as update_contact.
+    Nested objects merge key-by-key; lists are replaced wholesale.
+    Examples:
+      change title: {"title": "Neuer Titel"}
+      change price: {"price": {"netPrice": 19.99, "taxRate": 19}}
+    """
+    return services.update_article(_client_get(), article_id, changes)
 
 
 @mcp.tool

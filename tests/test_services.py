@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import respx
 
@@ -255,3 +257,79 @@ def test_build_order_confirmation_body_with_texts() -> None:
     bare = services.build_order_confirmation_body("c-1", [], introduction="   ", remark=None)
     assert "introduction" not in bare
     assert "remark" not in bare
+
+
+# -- update_contact / update_article (partial merge + version locking) -------
+
+_CONTACT_ID = "e2aa9756-83fe-4f97-a9c4-c68d64ed2a6b"
+
+
+@respx.mock
+def test_update_contact_merges_and_keeps_version(client: LexwareClient) -> None:
+    current = {
+        "id": _CONTACT_ID,
+        "version": 3,
+        "roles": {"customer": {"number": 20069}},
+        "company": {"name": "Alt GmbH", "contactPersons": [{"lastName": "Meier"}]},
+        "emailAddresses": {"business": ["alt@x.com"]},
+        "archived": False,
+    }
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(
+        return_value=httpx.Response(200, json={"id": _CONTACT_ID, "version": 4})
+    )
+    services.update_contact(
+        client, _CONTACT_ID, {"company": {"name": "Neu GmbH"}}
+    )
+    body = json.loads(put.calls.last.request.content)
+    # Only company.name changed; sibling keys and other sections preserved.
+    assert body["company"]["name"] == "Neu GmbH"
+    assert body["company"]["contactPersons"] == [{"lastName": "Meier"}]
+    assert body["emailAddresses"] == {"business": ["alt@x.com"]}
+    # The freshly fetched version is sent for optimistic locking.
+    assert body["version"] == 3
+
+
+@respx.mock
+def test_update_contact_replaces_lists_and_ignores_stale_version(
+    client: LexwareClient,
+) -> None:
+    current = {
+        "id": _CONTACT_ID,
+        "version": 5,
+        "emailAddresses": {"business": ["a@x.com", "b@x.com"]},
+    }
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(
+        return_value=httpx.Response(200, json={"version": 6})
+    )
+    # Caller passes a whole new list AND a stale version — both handled.
+    services.update_contact(
+        client,
+        _CONTACT_ID,
+        {"version": 1, "emailAddresses": {"business": ["neu@x.com"]}},
+    )
+    body = json.loads(put.calls.last.request.content)
+    assert body["emailAddresses"]["business"] == ["neu@x.com"]  # list replaced
+    assert body["version"] == 5  # stale version in changes ignored
+
+
+@respx.mock
+def test_update_article_merges_price(client: LexwareClient) -> None:
+    aid = "aaaa1111-2222-3333-4444-555566667777"
+    current = {
+        "id": aid,
+        "version": 2,
+        "title": "Schraube",
+        "price": {"netPrice": 0.10, "taxRate": 19, "leadingPrice": "NET"},
+    }
+    respx.get(f"{_ARTICLES}/{aid}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{_ARTICLES}/{aid}").mock(
+        return_value=httpx.Response(200, json={"version": 3})
+    )
+    services.update_article(client, aid, {"price": {"netPrice": 0.12}})
+    body = json.loads(put.calls.last.request.content)
+    assert body["price"]["netPrice"] == 0.12
+    assert body["price"]["taxRate"] == 19  # untouched sibling preserved
+    assert body["title"] == "Schraube"
+    assert body["version"] == 2
