@@ -31,6 +31,7 @@ async def test_tools_are_registered() -> None:
         assert "create_contact" in names
         assert "update_contact" in names
         assert "update_article" in names
+        assert "request_feature" in names
 
 
 @respx.mock

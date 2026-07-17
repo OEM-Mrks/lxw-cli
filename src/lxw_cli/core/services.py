@@ -567,7 +567,29 @@ def update_contact(
     """
     current = client.get(f"/v1/contacts/{contact_id}")
     merged = _merge_for_update(current, changes)
+    _guard_single_contact_person(merged)
     return _put_and_return_object(client, f"/v1/contacts/{contact_id}", merged)
+
+
+def _guard_single_contact_person(contact: dict[str, Any]) -> None:
+    """Fail early on contacts the Lexware REST API refuses to update.
+
+    A company contact may hold multiple contact persons in the Lexware web
+    app, but the REST API accepts **at most one** on create/update — a PUT with
+    more returns an opaque HTTP 406 (`invalid_value` on `contactPersons.size`).
+    Since our update always PUTs the full object, such a contact can't be
+    edited via the API at all, even for an unrelated field. Turn that into a
+    clear, actionable message instead of a raw 406.
+    """
+    persons = (contact.get("company") or {}).get("contactPersons") or []
+    if len(persons) > 1:
+        raise LexwareError(
+            "Dieser Kontakt hat mehrere Ansprechpartner. Die Lexware-API erlaubt "
+            "pro Firmen-Kontakt nur einen, deshalb lassen sich solche Kontakte "
+            "nicht über die API bearbeiten (auch nicht für andere Felder). Bitte "
+            "die Änderung direkt in der Lexware-Weboberfläche vornehmen. Für "
+            "weitere Ansprechpartner empfiehlt sich ein eigener Kontakt."
+        )
 
 
 # -- Articles ---------------------------------------------------------------

@@ -337,3 +337,25 @@ def test_update_article_merges_price(client: LexwareClient) -> None:
     assert body["price"]["taxRate"] == 19  # untouched sibling preserved
     assert body["title"] == "Schraube"
     assert body["version"] == 2
+
+
+@respx.mock
+def test_update_contact_blocks_multiple_contact_persons(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    current = {
+        "id": _CONTACT_ID,
+        "version": 2,
+        "company": {
+            "name": "Zwei Personen GmbH",
+            "contactPersons": [{"lastName": "A"}, {"lastName": "B"}],
+        },
+    }
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(LexwareError, match="mehrere Ansprechpartner"):
+        services.update_contact(client, _CONTACT_ID, {"emailAddresses": {"business": ["x@y.z"]}})
+    # Nothing was sent to Lexware — we failed before the PUT.
+    assert put.call_count == 0

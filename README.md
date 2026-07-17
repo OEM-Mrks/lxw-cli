@@ -376,7 +376,8 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 - **Lesen**: `profile`, `list_invoices`, `get_invoice`, `download_invoice_pdf`, `list_contacts`, `get_contact`, `list_vouchers`, `get_voucher`, `list_articles`, `get_article`, `list_quotations`, `get_quotation`, `download_quotation_pdf`, `list_order_confirmations`, `get_order_confirmation`, `download_order_confirmation_pdf`, `list_delivery_notes`, `get_delivery_note`, `download_delivery_note_pdf`
 - **Belege als Draft anlegen**: `create_invoice_draft`, `create_voucher_draft`, `create_quotation_draft`, `create_order_confirmation_draft`, `create_delivery_note_draft`
 - **Stammdaten anlegen** (kein Draft): `create_contact`, `create_article`
-- **Stammdaten bearbeiten** (Teil-Update mit Auto-Merge + automatischem `version`-Handling): `update_contact`, `update_article`. Es werden nur die übergebenen Felder geändert; verschachtelte Objekte werden feldweise zusammengeführt, Listen komplett ersetzt. (Kontakt-`archived` ist in der Lexware-API read-only und kann nicht per API gesetzt werden.)
+- **Stammdaten bearbeiten** (Teil-Update mit Auto-Merge + automatischem `version`-Handling): `update_contact`, `update_article`. Es werden nur die übergebenen Felder geändert; verschachtelte Objekte werden feldweise zusammengeführt, Listen komplett ersetzt. (Kontakt-`archived` ist in der Lexware-API read-only und kann nicht per API gesetzt werden. Firmen-Kontakte mit **mehr als einem Ansprechpartner** lassen sich per Lexware-API grundsätzlich nicht aktualisieren — `update_contact` meldet das klar, statt eines rohen HTTP 406.)
+- **Funktionswunsch melden**: `request_feature` leitet einen **unverbindlichen** Feature-Wunsch per E-Mail an den Anbieter (oemedia) weiter. Dies ist ein Endkundenprodukt — der Assistent baut keine Funktionen selbst, sondern bietet bei fehlenden Funktionen diesen Weg an. Versand nur, wenn SMTP konfiguriert ist (siehe unten).
 
 Alle document-Tools (`get_*`, `download_*_pdf`) akzeptieren UUID **oder** Belegnummer (z.B. `FB2600682`). PDFs landen in `~/Downloads/lexware/`.
 
@@ -442,6 +443,22 @@ Hinweise für den Betrieb:
 - Tokens laufen nach 24 h ab; Clients erneuern sie automatisch per
   Refresh-Token. Ein geleaktes Token wird wirkungslos, sobald der zugehörige
   Lexware-Key unter <https://app.lexware.de/addons/public-api> widerrufen wird.
+
+Funktionswünsche per E-Mail (`request_feature`) — optional, nur aktiv wenn SMTP
+gesetzt ist:
+
+```bash
+LXW_MCP_SMTP_HOST=smtp.example.com      # Pflicht zum Aktivieren
+LXW_MCP_SMTP_PORT=587                    # 465 → implizites SSL, sonst STARTTLS
+LXW_MCP_SMTP_USER=bot@example.com
+LXW_MCP_SMTP_PASSWORD=…
+LXW_MCP_SMTP_STARTTLS=true              # default true (bei Port 587)
+LXW_MCP_FEATURE_TO=david@oemedia.de     # Empfänger (default: david@oemedia.de)
+LXW_MCP_FEATURE_FROM=bot@example.com    # Absender (default: SMTP-User)
+```
+
+Ohne SMTP-Konfiguration meldet `request_feature` klar, dass der Versand nicht
+eingerichtet ist — es geht nie stillschweigend etwas verloren.
 
 ## Out of Scope (v1)
 
