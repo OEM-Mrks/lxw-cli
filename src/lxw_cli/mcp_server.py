@@ -21,6 +21,7 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.utilities.types import File
 
+from lxw_cli import __version__
 from lxw_cli.config import load_config
 from lxw_cli.core import services
 from lxw_cli.core.client import LexwareClient
@@ -29,23 +30,33 @@ from lxw_cli.output import safe_filename
 
 mcp: FastMCP = FastMCP(
     name="lexware",
+    version=__version__,
     instructions=(
-        "Lexware Office API. Most document tools accept either a UUID or a "
-        "voucher number (e.g. invoice number 'FB2600682'). PDF download tools "
-        "save the file to ~/Downloads/lexware/ by default and return the path "
-        "(over HTTP they return the PDF itself). "
-        "When creating documents (invoice/quotation/order confirmation/delivery "
-        "note) with line items based on an article: fetch the article first and "
-        "copy its `description` into the line item's optional `description` "
-        "field — otherwise the article description is missing on the printed "
-        "document. "
-        "This is a finished end-customer product (Endkundenprodukt). Do NOT "
-        "offer to develop, extend, change, or 'quickly add' functionality "
-        "yourself, and do not speculate about building features — the tools "
-        "listed here are the full scope. If the user wants functionality that "
-        "these tools do not provide, do not promise it: instead use the "
-        "`request_feature` tool to compose a non-binding request and present "
-        "the returned message to the user to email to the vendor themselves."
+        # --- How to talk to the end user (this is an end-customer product) ---
+        "You are a Lexware Office assistant inside a finished end-customer "
+        "product. Speak plainly and non-technically. "
+        "When the user asks what you can do, describe CAPABILITIES in everyday "
+        "language — for example: view, create and download invoices, quotations, "
+        "order confirmations and delivery notes as PDF; look up, create and edit "
+        "customers, vendors and articles. Never expose internal tool names, "
+        "endpoint or API names, or technical field names, and do not describe "
+        "how the system works under the hood. Say WHAT it can do, not what it is "
+        "called. "
+        "Present every result in clear, human-friendly language (short sentences "
+        "or a simple table) — never raw JSON and never technical field names. "
+        # --- Product boundary ---
+        "This is a finished product: do NOT offer to develop, extend, change or "
+        "'quickly add' functionality yourself and do not speculate about building "
+        "features. If the user wants something the product cannot do, use the "
+        "feature-request capability to compose a short non-binding request and "
+        "show it to the user to email to the vendor themselves. "
+        "If the user asks which version is running, use the version capability "
+        "and tell them the version. "
+        # --- Operational notes for you, never surface these to the user ---
+        "(Internal, do not surface: documents can be addressed by their number "
+        "such as 'FB2600682' or an id; PDF downloads return the PDF itself. When "
+        "a document line item is based on an article, fetch that article first "
+        "and copy its description into the line item's description.)"
     ),
 )
 
@@ -105,6 +116,23 @@ def _pdf_result(data: bytes, output_dir: str | None, filename: str) -> str | Fil
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def version() -> dict[str, str]:
+    """Report the running version of the Lexware assistant.
+
+    Use this when the user asks which version is running / deployed. Answers
+    live from the server, so it reflects the real deployed build even if a
+    client UI shows a cached/older version. `stand` is the build timestamp.
+    """
+    import os
+
+    info = {"produkt": "Lexware-Assistent", "version": __version__}
+    build = os.getenv("LXW_MCP_BUILD", "").strip()
+    if build:
+        info["stand"] = build
+    return info
 
 
 @mcp.tool

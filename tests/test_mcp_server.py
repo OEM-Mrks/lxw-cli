@@ -32,6 +32,17 @@ async def test_tools_are_registered() -> None:
         assert "update_contact" in names
         assert "update_article" in names
         assert "request_feature" in names
+        assert "version" in names
+
+
+@pytest.mark.asyncio
+async def test_version_tool_reports_package_version() -> None:
+    from lxw_cli import __version__
+
+    async with Client(mcp) as c:
+        result = await c.call_tool("version", {})
+    assert result.data["version"] == __version__
+    assert result.data["produkt"] == "Lexware-Assistent"
 
 
 @respx.mock
