@@ -500,6 +500,155 @@ def create_delivery_note(
     return client.post("/v1/delivery-notes", body)
 
 
+# -- Belegkette: einen Beleg in den Folgebeleg fortführen (pursue) -----------
+
+# Which follow-up ("pursue") transitions we support. Key = normalized target;
+# `from_type`/`source_path` locate the preceding document, `target_path` is the
+# create endpoint the follow-up is POSTed to (with ?precedingSalesVoucherId).
+_PURSUE_TARGETS: dict[str, dict[str, Any]] = {
+    "orderconfirmation": {
+        "from_type": "quotation",
+        "source_path": "/v1/quotations/{id}",
+        "target_path": "/v1/order-confirmations",
+        "from_label": "Angebot",
+        "to_label": "Auftrag",
+    },
+    "invoice": {
+        "from_type": "orderconfirmation",
+        "source_path": "/v1/order-confirmations/{id}",
+        "target_path": "/v1/invoices",
+        "from_label": "Auftrag",
+        "to_label": "Rechnung",
+    },
+}
+
+# Accept a few human/German synonyms for the target document type.
+_PURSUE_ALIASES = {
+    "orderconfirmation": "orderconfirmation",
+    "order_confirmation": "orderconfirmation",
+    "order-confirmation": "orderconfirmation",
+    "auftrag": "orderconfirmation",
+    "auftragsbestätigung": "orderconfirmation",
+    "invoice": "invoice",
+    "rechnung": "invoice",
+}
+
+# Server-managed / computed fields, plus type-specific fields that must not be
+# carried into the follow-up (e.g. a quotation's expirationDate has no place on
+# an order confirmation or invoice).
+_PURSUE_DROP_DOC = {
+    "id",
+    "organizationId",
+    "version",
+    "voucherNumber",
+    "voucherStatus",
+    "createdDate",
+    "updatedDate",
+    "files",
+    "relatedVouchers",
+    "archived",
+    "taxAmounts",
+    "expirationDate",
+    "electronicDocumentProfile",
+}
+_PURSUE_DROP_LINEITEM = {"id", "lineItemAmount"}
+
+
+def continue_document(
+    client: LexwareClient, identifier: str, target: str
+) -> dict[str, Any]:
+    """Continue a sales voucher into its follow-up, preserving the chain.
+
+    Fetches the preceding document (`identifier` = UUID or voucher number),
+    copies its content into a fresh draft of `target`, and POSTs it with
+    ``precedingSalesVoucherId`` so Lexware links both in the Belegkette.
+    Supported: Angebot→Auftrag and Auftrag→Rechnung. Invalid transitions are
+    reported clearly instead of as a raw HTTP 406.
+    """
+    key = _PURSUE_ALIASES.get(target.strip().lower())
+    if key is None:
+        raise LexwareError(
+            f"Unbekanntes Ziel '{target}'. Möglich sind 'Auftrag' (aus einem "
+            "Angebot) und 'Rechnung' (aus einem Auftrag)."
+        )
+    cfg = _PURSUE_TARGETS[key]
+    source_id = resolve_voucher_id(client, identifier, cfg["from_type"])
+    source = get_with_voucher_fallback(client, cfg["source_path"].format(id=source_id))
+    body = _pursue_body(source)
+    try:
+        return client.post(
+            cfg["target_path"], body, params={"precedingSalesVoucherId": source_id}
+        )
+    except LexwareAPIError as exc:
+        if exc.status_code in (400, 406):
+            raise LexwareError(_pursue_error(exc, cfg)) from exc
+        raise
+
+
+def _pursue_error(exc: LexwareAPIError, cfg: dict[str, Any]) -> str:
+    """Turn a 400/406 from a pursue POST into a clear German message.
+
+    Lexware uses 406 for three cases: body validation (with a `details` list),
+    a not-yet-finalized preceding document, and a plain invalid transition.
+    Surface the most specific explanation available.
+    """
+    to_label = cfg["to_label"]
+    body = exc.body if isinstance(exc.body, dict) else {}
+
+    details = body.get("details")
+    if details:
+        parts = [
+            f"{d.get('field', '?')}: {d.get('message', '')}".strip(": ")
+            for d in details
+            if isinstance(d, dict)
+        ]
+        joined = "; ".join(p for p in parts if p)
+        if joined:
+            return f"Weiterführen zu '{to_label}' nicht möglich: {joined}."
+
+    message = (body.get("message") or "").strip()
+    if "finali" in message.lower():
+        return (
+            f"Der Ausgangsbeleg ({cfg['from_label']}) ist noch ein Entwurf. Er muss "
+            "in Lexware erst festgeschrieben werden, bevor er zu einer/einem "
+            f"'{to_label}' weitergeführt werden kann."
+        )
+    if message:
+        return f"Weiterführen zu '{to_label}' nicht möglich: {message}"
+
+    return (
+        f"Dieser Beleg lässt sich nicht zu '{to_label}' weiterführen. Möglich ist "
+        f"das nur aus einem {cfg['from_label']} und nur, solange der Beleg dafür "
+        "gültig ist (z. B. nicht storniert oder bereits weitergeführt)."
+    )
+
+
+def _pursue_body(source: dict[str, Any]) -> dict[str, Any]:
+    """Turn a fetched document into a fresh create-body for its follow-up.
+
+    Drops server-managed/computed fields, re-dates the document to today, keeps
+    only the currency on ``totalPrice`` (amounts are recomputed server-side),
+    and strips per-line-item ids/amounts. Content (address, line items, tax /
+    shipping / payment conditions, texts, language) carries over unchanged.
+    """
+    body = {k: v for k, v in source.items() if k not in _PURSUE_DROP_DOC}
+    body["voucherDate"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    body["lineItems"] = [
+        {k: v for k, v in item.items() if k not in _PURSUE_DROP_LINEITEM}
+        for item in (body.get("lineItems") or [])
+    ]
+    currency = (source.get("totalPrice") or {}).get("currency", "EUR")
+    body["totalPrice"] = {"currency": currency}
+    # Ensure the follow-up's required blocks exist even when the source type
+    # doesn't carry them (a quotation has no shippingConditions, but an order
+    # confirmation / invoice requires one).
+    if not body.get("taxConditions"):
+        body["taxConditions"] = {"taxType": "net"}
+    if not body.get("shippingConditions"):
+        body["shippingConditions"] = {"shippingType": "none"}
+    return body
+
+
 # -- Contacts ---------------------------------------------------------------
 
 

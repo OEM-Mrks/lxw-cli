@@ -510,6 +510,25 @@ def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool
+def continue_document(identifier: str, target: str) -> dict[str, Any]:
+    """Continue a document into its follow-up, keeping them linked (Belegkette).
+
+    Use when the user wants to carry a document forward to the next step. The
+    content (customer, positions, texts) is taken over and both documents stay
+    linked to each other. The follow-up is created as a draft.
+
+    `identifier`: the source document's number or id.
+    `target`: 'Auftrag' to continue a quotation (Angebot) into an order
+        confirmation, or 'Rechnung' to continue an order confirmation (Auftrag)
+        into an invoice.
+    Note: to continue an order into an invoice, the order must already be
+    finalized (festgeschrieben) in Lexware — a draft order cannot be continued;
+    this is reported clearly if it applies. Other transitions are not available.
+    """
+    return services.continue_document(_client_get(), identifier, target)
+
+
+@mcp.tool
 def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
     """Create a delivery note as draft.
 

@@ -33,6 +33,7 @@ async def test_tools_are_registered() -> None:
         assert "update_article" in names
         assert "request_feature" in names
         assert "version" in names
+        assert "continue_document" in names
 
 
 @pytest.mark.asyncio

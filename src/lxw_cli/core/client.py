@@ -125,8 +125,10 @@ class LexwareClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return self._request("GET", path, params=params).json()
 
-    def post(self, path: str, json_body: Any) -> Any:
-        return self._request("POST", path, json=json_body).json()
+    def post(
+        self, path: str, json_body: Any, params: dict[str, Any] | None = None
+    ) -> Any:
+        return self._request("POST", path, params=params, json=json_body).json()
 
     def put(self, path: str, json_body: Any) -> Any:
         return self._request("PUT", path, json=json_body).json()

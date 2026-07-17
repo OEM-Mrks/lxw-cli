@@ -371,9 +371,10 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 
 ### Verfügbare MCP-Tools
 
-30 Tools mit identischem Verhalten wie die CLI-Befehle:
+31 Tools mit identischem Verhalten wie die CLI-Befehle:
 
 - **Info**: `version` (meldet die laufende Version + Build-Zeitstempel — nützlich, wenn eine Client-UI wie ChatGPT eine gecachte/alte Version anzeigt)
+- **Belegkette (weiterführen)**: `continue_document` führt einen Beleg in den Folgebeleg fort und hält beide verknüpft (`precedingSalesVoucherId`). Unterstützt: **Angebot → Auftrag** und **Auftrag → Rechnung**. Inhalte (Kunde, Positionen, Texte) werden übernommen, der Folgebeleg entsteht als Entwurf. Ein Auftrag muss **festgeschrieben** sein, bevor er zur Rechnung weitergeführt werden kann (sonst klare Meldung statt HTTP 406).
 - **Lesen**: `profile`, `list_invoices`, `get_invoice`, `download_invoice_pdf`, `list_contacts`, `get_contact`, `list_vouchers`, `get_voucher`, `list_articles`, `get_article`, `list_quotations`, `get_quotation`, `download_quotation_pdf`, `list_order_confirmations`, `get_order_confirmation`, `download_order_confirmation_pdf`, `list_delivery_notes`, `get_delivery_note`, `download_delivery_note_pdf`
 - **Belege als Draft anlegen**: `create_invoice_draft`, `create_voucher_draft`, `create_quotation_draft`, `create_order_confirmation_draft`, `create_delivery_note_draft`
 - **Stammdaten anlegen** (kein Draft): `create_contact`, `create_article`
