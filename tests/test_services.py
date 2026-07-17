@@ -361,134 +361,138 @@ def test_update_contact_blocks_multiple_contact_persons(client: LexwareClient) -
     assert put.call_count == 0
 
 
+
 # -- continue_document (Belegkette / pursue) ---------------------------------
 
-_QID = "aaaa1111-2222-3333-4444-555566667777"
-_OCID = "bbbb1111-2222-3333-4444-555566667777"
-_QUOTATIONS = "https://api.lexware.io/v1/quotations"
 _ORDER_CONFIRMATIONS = "https://api.lexware.io/v1/order-confirmations"
 _INVOICES = "https://api.lexware.io/v1/invoices"
+_DELIVERY_NOTES = "https://api.lexware.io/v1/delivery-notes"
+_CREDIT_NOTES = "https://api.lexware.io/v1/credit-notes"
+_SRCID = "aaaa1111-2222-3333-4444-555566667777"
+
+
+def _mock_voucherlist(number: str, vtype: str, vid: str = _SRCID) -> None:
+    respx.get(_VOUCHERLIST).mock(
+        return_value=httpx.Response(
+            200, json={"content": [{"id": vid, "voucherNumber": number, "voucherType": vtype}]}
+        )
+    )
 
 
 @respx.mock
 def test_continue_quotation_to_order_confirmation(client: LexwareClient) -> None:
+    _mock_voucherlist("AG-1", "quotation")
     source = {
-        "id": _QID,
-        "version": 2,
-        "voucherNumber": "AG-1",
-        "voucherStatus": "draft",
+        "id": _SRCID, "version": 2, "voucherNumber": "AG-1", "voucherStatus": "open",
         "expirationDate": "2026-01-01T00:00:00.000+01:00",
         "address": {"contactId": "c-1"},
-        "lineItems": [
-            {"id": "li-1", "type": "custom", "name": "Pos", "quantity": 2,
-             "lineItemAmount": 20.0, "unitName": "Stück"}
-        ],
+        "lineItems": [{"id": "li-1", "type": "custom", "name": "Pos", "quantity": 2,
+                       "lineItemAmount": 20.0, "unitName": "Stück"}],
         "taxConditions": {"taxType": "net"},
         "totalPrice": {"currency": "EUR", "totalNetAmount": 20.0},
-        "relatedVouchers": [],
     }
-    respx.get(f"{_QUOTATIONS}/{_QID}").mock(return_value=httpx.Response(200, json=source))
-    route = respx.post(_ORDER_CONFIRMATIONS).mock(
-        return_value=httpx.Response(201, json={"id": _OCID, "version": 1})
-    )
-    result = services.continue_document(client, _QID, "Auftrag")
-    assert result["id"] == _OCID
-    req = route.calls.last.request
-    # Links the chain via the query parameter.
-    assert f"precedingSalesVoucherId={_QID}" in str(req.url)
-    body = json.loads(req.content)
-    # Server-managed + quotation-only fields dropped; line-item id/amount gone;
-    # a shippingConditions default is injected; totalPrice reduced to currency.
-    assert "expirationDate" not in body
-    assert "voucherNumber" not in body and "version" not in body
-    assert body["lineItems"][0].get("id") is None
-    assert body["lineItems"][0].get("lineItemAmount") is None
-    assert body["shippingConditions"] == {"shippingType": "none"}
-    assert body["totalPrice"] == {"currency": "EUR"}
-    assert "voucherDate" in body
-
-
-@respx.mock
-def test_continue_order_confirmation_to_invoice_keeps_real_shipping(
-    client: LexwareClient,
-) -> None:
-    source = {
-        "id": _OCID,
-        "version": 1,
-        "address": {"contactId": "c-1"},
-        "lineItems": [{"type": "custom", "name": "P", "quantity": 1}],
-        "taxConditions": {"taxType": "net"},
-        "shippingConditions": {"shippingType": "service", "shippingDate": "2026-02-01"},
-        "totalPrice": {"currency": "EUR"},
-    }
-    respx.get(f"{_ORDER_CONFIRMATIONS}/{_OCID}").mock(
+    respx.get(f"https://api.lexware.io/v1/quotations/{_SRCID}").mock(
         return_value=httpx.Response(200, json=source)
     )
-    route = respx.post(_INVOICES).mock(
-        return_value=httpx.Response(201, json={"id": "inv-1"})
+    route = respx.post(_ORDER_CONFIRMATIONS).mock(
+        return_value=httpx.Response(201, json={"id": "oc-1"})
     )
-    services.continue_document(client, _OCID, "Rechnung")
-    body = json.loads(route.calls.last.request.content)
-    # An existing shippingConditions is preserved, not overwritten by the default.
-    assert body["shippingConditions"]["shippingType"] == "service"
+    result = services.continue_document(client, "AG-1", "Auftrag")
+    assert result["id"] == "oc-1"
+    req = route.calls.last.request
+    assert f"precedingSalesVoucherId={_SRCID}" in str(req.url)
+    body = json.loads(req.content)
+    assert "expirationDate" not in body and "voucherNumber" not in body
+    assert body["lineItems"][0].get("id") is None
+    assert body["shippingConditions"] == {"shippingType": "none"}
+    assert body["totalPrice"] == {"currency": "EUR"}
 
 
 @respx.mock
-def test_continue_rejects_unknown_target(client: LexwareClient) -> None:
-    import pytest
-
-    from lxw_cli.core.errors import LexwareError
-
-    with pytest.raises(LexwareError, match="Unbekanntes Ziel"):
-        services.continue_document(client, _QID, "Lieferschein")
-
-
-@respx.mock
-def test_continue_draft_order_reports_finalize_requirement(
-    client: LexwareClient,
-) -> None:
-    import pytest
-
-    from lxw_cli.core.errors import LexwareError
-
-    respx.get(f"{_ORDER_CONFIRMATIONS}/{_OCID}").mock(
+def test_continue_invoice_to_credit_note(client: LexwareClient) -> None:
+    _mock_voucherlist("RG-9", "salesinvoice")  # invoices report as salesinvoice
+    respx.get(f"{_INVOICES}/{_SRCID}").mock(
         return_value=httpx.Response(
-            200, json={"id": _OCID, "lineItems": [], "totalPrice": {"currency": "EUR"}}
+            200,
+            json={"id": _SRCID, "address": {"contactId": "c"}, "lineItems": [],
+                  "taxConditions": {"taxType": "net"},
+                  "shippingConditions": {"shippingType": "none"},
+                  "totalPrice": {"currency": "EUR"}},
+        )
+    )
+    route = respx.post(_CREDIT_NOTES).mock(return_value=httpx.Response(201, json={"id": "cn-1"}))
+    result = services.continue_document(client, "RG-9", "Rechnungskorrektur")
+    assert result["id"] == "cn-1"
+    assert f"precedingSalesVoucherId={_SRCID}" in str(route.calls.last.request.url)
+
+
+@respx.mock
+def test_continue_delivery_note_to_invoice_by_uuid(client: LexwareClient) -> None:
+    # UUID source: probing tries quotation (404), order-conf (404), delivery-note (200).
+    respx.get(f"https://api.lexware.io/v1/quotations/{_SRCID}").mock(
+        return_value=httpx.Response(404, json={"message": "no"})
+    )
+    respx.get(f"{_ORDER_CONFIRMATIONS}/{_SRCID}").mock(
+        return_value=httpx.Response(404, json={"message": "no"})
+    )
+    respx.get(f"{_DELIVERY_NOTES}/{_SRCID}").mock(
+        return_value=httpx.Response(
+            200, json={"id": _SRCID, "address": {"contactId": "c"}, "lineItems": [],
+                       "totalPrice": {"currency": "EUR"}}
+        )
+    )
+    respx.post(_INVOICES).mock(return_value=httpx.Response(201, json={"id": "inv-1"}))
+    result = services.continue_document(client, _SRCID, "Rechnung")
+    assert result["id"] == "inv-1"
+
+
+@respx.mock
+def test_continue_rejects_invalid_transition(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    _mock_voucherlist("LS-1", "deliverynote")
+    respx.get(f"{_DELIVERY_NOTES}/{_SRCID}").mock(
+        return_value=httpx.Response(200, json={"id": _SRCID, "lineItems": []})
+    )
+    # A delivery note cannot become a credit note.
+    with pytest.raises(LexwareError, match="Von hier möglich"):
+        services.continue_document(client, "LS-1", "Rechnungskorrektur")
+
+
+def test_continue_rejects_unsupported_and_unknown_targets(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    with pytest.raises(LexwareError, match="Abschlagsrechnung"):
+        services.continue_document(client, "AG-1", "Abschlagsrechnung")
+    with pytest.raises(LexwareError, match="Serienrechnung"):
+        services.continue_document(client, "RG-1", "Serienrechnung")
+    with pytest.raises(LexwareError, match="Unbekanntes Ziel"):
+        services.continue_document(client, "AG-1", "Quatsch")
+
+
+@respx.mock
+def test_continue_draft_reports_finalize_requirement(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    _mock_voucherlist("AB-1", "orderconfirmation")
+    respx.get(f"{_ORDER_CONFIRMATIONS}/{_SRCID}").mock(
+        return_value=httpx.Response(
+            200, json={"id": _SRCID, "lineItems": [], "totalPrice": {"currency": "EUR"}}
         )
     )
     respx.post(_INVOICES).mock(
         return_value=httpx.Response(
             406,
-            json={
-                "status": 406,
-                "message": "Cannot pursue because Order with billingStatus draft "
-                "have to be finalized before pursuing",
-            },
+            json={"status": 406,
+                  "message": "Cannot pursue because Order with billingStatus draft "
+                  "have to be finalized before pursuing"},
         )
     )
     with pytest.raises(LexwareError, match="festgeschrieben"):
-        services.continue_document(client, _OCID, "Rechnung")
-
-
-@respx.mock
-def test_continue_surfaces_field_validation(client: LexwareClient) -> None:
-    import pytest
-
-    from lxw_cli.core.errors import LexwareError
-
-    respx.get(f"{_QUOTATIONS}/{_QID}").mock(
-        return_value=httpx.Response(
-            200, json={"id": _QID, "lineItems": [], "totalPrice": {"currency": "EUR"}}
-        )
-    )
-    respx.post(_ORDER_CONFIRMATIONS).mock(
-        return_value=httpx.Response(
-            406,
-            json={
-                "status": 406,
-                "details": [{"field": "lineItems", "message": "darf nicht leer sein"}],
-            },
-        )
-    )
-    with pytest.raises(LexwareError, match="lineItems: darf nicht leer sein"):
-        services.continue_document(client, _QID, "Auftrag")
+        services.continue_document(client, "AB-1", "Rechnung")

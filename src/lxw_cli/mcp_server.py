@@ -515,15 +515,19 @@ def continue_document(identifier: str, target: str) -> dict[str, Any]:
 
     Use when the user wants to carry a document forward to the next step. The
     content (customer, positions, texts) is taken over and both documents stay
-    linked to each other. The follow-up is created as a draft.
+    linked. The follow-up is created as a draft. The source type is detected
+    automatically from `identifier`.
 
     `identifier`: the source document's number or id.
-    `target`: 'Auftrag' to continue a quotation (Angebot) into an order
-        confirmation, or 'Rechnung' to continue an order confirmation (Auftrag)
-        into an invoice.
-    Note: to continue an order into an invoice, the order must already be
-    finalized (festgeschrieben) in Lexware — a draft order cannot be continued;
-    this is reported clearly if it applies. Other transitions are not available.
+    `target`: the follow-up to create. Supported paths (same as in Lexware):
+        - from a quotation (Angebot): 'Auftrag', 'Lieferschein' or 'Rechnung'
+        - from an order confirmation (Auftrag): 'Lieferschein' or 'Rechnung'
+        - from a delivery note (Lieferschein): 'Rechnung'
+        - from an invoice (Rechnung): 'Lieferschein' or 'Rechnungskorrektur'
+    Notes: continuing to an invoice/credit note requires the source to be
+    finalized (festgeschrieben) first — reported clearly if not. 'Abschlags-
+    rechnung' and 'Serienrechnung' cannot be created via the interface (only in
+    Lexware directly). Unsupported steps are reported clearly.
     """
     return services.continue_document(_client_get(), identifier, target)
 

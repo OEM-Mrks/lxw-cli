@@ -502,36 +502,69 @@ def create_delivery_note(
 
 # -- Belegkette: einen Beleg in den Folgebeleg fortführen (pursue) -----------
 
-# Which follow-up ("pursue") transitions we support. Key = normalized target;
-# `from_type`/`source_path` locate the preceding document, `target_path` is the
-# create endpoint the follow-up is POSTed to (with ?precedingSalesVoucherId).
-_PURSUE_TARGETS: dict[str, dict[str, Any]] = {
+# Human labels + the resource endpoint per document type.
+_DOC_META: dict[str, dict[str, str]] = {
+    "quotation": {"label": "Angebot", "path": "/v1/quotations/{id}"},
+    "orderconfirmation": {"label": "Auftrag", "path": "/v1/order-confirmations/{id}"},
+    "deliverynote": {"label": "Lieferschein", "path": "/v1/delivery-notes/{id}"},
+    "invoice": {"label": "Rechnung", "path": "/v1/invoices/{id}"},
+    "creditnote": {"label": "Rechnungskorrektur", "path": "/v1/credit-notes/{id}"},
+}
+
+# The follow-up transitions Lexware's API supports (mirrors the web app's
+# "Weiterführen" menu). Nested: source type -> target type -> create endpoint.
+# Abschlagsrechnung (down payment) and Serienrechnung are intentionally absent —
+# the API cannot create those (down payment invoices are read-only).
+_PURSUE_MATRIX: dict[str, dict[str, str]] = {
+    "quotation": {
+        "orderconfirmation": "/v1/order-confirmations",
+        "deliverynote": "/v1/delivery-notes",
+        "invoice": "/v1/invoices",
+    },
     "orderconfirmation": {
-        "from_type": "quotation",
-        "source_path": "/v1/quotations/{id}",
-        "target_path": "/v1/order-confirmations",
-        "from_label": "Angebot",
-        "to_label": "Auftrag",
+        "deliverynote": "/v1/delivery-notes",
+        "invoice": "/v1/invoices",
+    },
+    "deliverynote": {
+        "invoice": "/v1/invoices",
     },
     "invoice": {
-        "from_type": "orderconfirmation",
-        "source_path": "/v1/order-confirmations/{id}",
-        "target_path": "/v1/invoices",
-        "from_label": "Auftrag",
-        "to_label": "Rechnung",
+        "deliverynote": "/v1/delivery-notes",
+        "creditnote": "/v1/credit-notes",
     },
 }
 
-# Accept a few human/German synonyms for the target document type.
-_PURSUE_ALIASES = {
+# Map human/German synonyms (and API type strings) to a normalized target type.
+_TARGET_ALIASES = {
+    "auftrag": "orderconfirmation",
+    "auftragsbestätigung": "orderconfirmation",
+    "auftragsbestaetigung": "orderconfirmation",
     "orderconfirmation": "orderconfirmation",
     "order_confirmation": "orderconfirmation",
     "order-confirmation": "orderconfirmation",
-    "auftrag": "orderconfirmation",
-    "auftragsbestätigung": "orderconfirmation",
-    "invoice": "invoice",
+    "lieferschein": "deliverynote",
+    "deliverynote": "deliverynote",
+    "delivery_note": "deliverynote",
     "rechnung": "invoice",
+    "invoice": "invoice",
+    "rechnungskorrektur": "creditnote",
+    "gutschrift": "creditnote",
+    "korrektur": "creditnote",
+    "creditnote": "creditnote",
+    "credit_note": "creditnote",
 }
+
+# Targets a user may ask for that the API cannot create (only the web app can).
+_TARGET_UNSUPPORTED = {
+    "abschlagsrechnung": "Abschlagsrechnung",
+    "downpaymentinvoice": "Abschlagsrechnung",
+    "down_payment_invoice": "Abschlagsrechnung",
+    "serienrechnung": "Serienrechnung",
+    "recurring": "Serienrechnung",
+}
+
+# voucherlist reports finalized invoices as "salesinvoice"; normalize to our key.
+_SOURCE_TYPE_NORMALIZE = {"salesinvoice": "invoice"}
 
 # Server-managed / computed fields, plus type-specific fields that must not be
 # carried into the follow-up (e.g. a quotation's expirationDate has no place on
@@ -559,40 +592,116 @@ def continue_document(
 ) -> dict[str, Any]:
     """Continue a sales voucher into its follow-up, preserving the chain.
 
-    Fetches the preceding document (`identifier` = UUID or voucher number),
-    copies its content into a fresh draft of `target`, and POSTs it with
-    ``precedingSalesVoucherId`` so Lexware links both in the Belegkette.
-    Supported: Angebot→Auftrag and Auftrag→Rechnung. Invalid transitions are
+    Detects the source document's type from `identifier` (UUID or voucher
+    number), copies its content into a fresh draft of `target`, and POSTs it
+    with ``precedingSalesVoucherId`` so Lexware links both in the Belegkette.
+    Supported transitions mirror the Lexware web app (Angebot→Auftrag/
+    Lieferschein/Rechnung, Auftrag→Lieferschein/Rechnung, Lieferschein→Rechnung,
+    Rechnung→Lieferschein/Rechnungskorrektur). Invalid or unsupported steps are
     reported clearly instead of as a raw HTTP 406.
     """
-    key = _PURSUE_ALIASES.get(target.strip().lower())
-    if key is None:
+    raw = target.strip().lower()
+    if raw in _TARGET_UNSUPPORTED:
+        name = _TARGET_UNSUPPORTED[raw]
         raise LexwareError(
-            f"Unbekanntes Ziel '{target}'. Möglich sind 'Auftrag' (aus einem "
-            "Angebot) und 'Rechnung' (aus einem Auftrag)."
+            f"{name} kann über die Schnittstelle nicht erstellt werden — das geht "
+            "nur direkt in Lexware."
         )
-    cfg = _PURSUE_TARGETS[key]
-    source_id = resolve_voucher_id(client, identifier, cfg["from_type"])
-    source = get_with_voucher_fallback(client, cfg["source_path"].format(id=source_id))
+    target_type = _TARGET_ALIASES.get(raw)
+    if target_type is None:
+        raise LexwareError(
+            f"Unbekanntes Ziel '{target}'. Möglich sind: Auftrag, Lieferschein, "
+            "Rechnung oder Rechnungskorrektur."
+        )
+
+    source_type, source_id, source = _resolve_source(client, identifier)
+    allowed = _PURSUE_MATRIX.get(source_type, {})
+    target_path = allowed.get(target_type)
+    if target_path is None:
+        from_label = _DOC_META.get(source_type, {}).get("label", source_type)
+        options = ", ".join(_DOC_META[t]["label"] for t in allowed) or "keine"
+        raise LexwareError(
+            f"Ein {from_label} kann nicht zu '{_DOC_META[target_type]['label']}' "
+            f"weitergeführt werden. Von hier möglich: {options}."
+        )
+
     body = _pursue_body(source)
     try:
         return client.post(
-            cfg["target_path"], body, params={"precedingSalesVoucherId": source_id}
+            target_path, body, params={"precedingSalesVoucherId": source_id}
         )
     except LexwareAPIError as exc:
         if exc.status_code in (400, 406):
-            raise LexwareError(_pursue_error(exc, cfg)) from exc
+            raise LexwareError(
+                _pursue_error(exc, source_type, target_type)
+            ) from exc
         raise
 
 
-def _pursue_error(exc: LexwareAPIError, cfg: dict[str, Any]) -> str:
+def _resolve_source(
+    client: LexwareClient, identifier: str
+) -> tuple[str, str, dict[str, Any]]:
+    """Determine a source document's (normalized type, id, full body).
+
+    A voucher number is looked up in the voucherlist (which reports the type).
+    A UUID is probed against each sales-voucher endpoint until one answers.
+    """
+    ident = identifier.strip()
+    if _looks_like_uuid(ident):
+        for source_type, meta in _DOC_META.items():
+            try:
+                doc = client.get(meta["path"].format(id=ident))
+            except LexwareAPIError as exc:
+                if exc.status_code == 404:
+                    continue
+                raise
+            return source_type, ident, doc
+        raise LexwareError(
+            f"Kein Beleg mit der ID '{identifier}' gefunden."
+        )
+
+    # Voucher number: the voucherlist row carries the type and the real id.
+    result = client.get(
+        "/v1/voucherlist",
+        params={
+            "voucherNumber": ident,
+            "voucherType": ALL_VOUCHER_TYPES,  # already a comma-joined string
+            "voucherStatus": "any",
+            "size": 2,
+        },
+    )
+    rows = result.get("content") or []
+    if not rows:
+        raise LexwareError(f"Kein Beleg mit Nummer '{identifier}' gefunden.")
+    row = rows[0]
+    raw_type = row.get("voucherType", "")
+    source_type = _SOURCE_TYPE_NORMALIZE.get(raw_type, raw_type)
+    meta = _DOC_META.get(source_type)
+    if meta is None:
+        raise LexwareError(
+            f"Belegtyp '{raw_type}' von '{identifier}' kann nicht weitergeführt "
+            "werden."
+        )
+    doc = get_with_voucher_fallback(client, meta["path"].format(id=row["id"]))
+    return source_type, row["id"], doc
+
+
+def _looks_like_uuid(value: str) -> bool:
+    parts = value.split("-")
+    return len(parts) == 5 and all(
+        c in "0123456789abcdefABCDEF" for c in value.replace("-", "")
+    )
+
+
+def _pursue_error(exc: LexwareAPIError, source_type: str, target_type: str) -> str:
     """Turn a 400/406 from a pursue POST into a clear German message.
 
     Lexware uses 406 for three cases: body validation (with a `details` list),
     a not-yet-finalized preceding document, and a plain invalid transition.
     Surface the most specific explanation available.
     """
-    to_label = cfg["to_label"]
+    to_label = _DOC_META[target_type]["label"]
+    from_label = _DOC_META.get(source_type, {}).get("label", source_type)
     body = exc.body if isinstance(exc.body, dict) else {}
 
     details = body.get("details")
@@ -609,17 +718,16 @@ def _pursue_error(exc: LexwareAPIError, cfg: dict[str, Any]) -> str:
     message = (body.get("message") or "").strip()
     if "finali" in message.lower():
         return (
-            f"Der Ausgangsbeleg ({cfg['from_label']}) ist noch ein Entwurf. Er muss "
-            "in Lexware erst festgeschrieben werden, bevor er zu einer/einem "
-            f"'{to_label}' weitergeführt werden kann."
+            f"Der Ausgangsbeleg ({from_label}) ist noch ein Entwurf. Er muss in "
+            f"Lexware erst festgeschrieben werden, bevor er zu '{to_label}' "
+            "weitergeführt werden kann."
         )
     if message:
         return f"Weiterführen zu '{to_label}' nicht möglich: {message}"
 
     return (
-        f"Dieser Beleg lässt sich nicht zu '{to_label}' weiterführen. Möglich ist "
-        f"das nur aus einem {cfg['from_label']} und nur, solange der Beleg dafür "
-        "gültig ist (z. B. nicht storniert oder bereits weitergeführt)."
+        f"Dieser {from_label} lässt sich gerade nicht zu '{to_label}' weiterführen "
+        "(z. B. weil er storniert oder bereits weitergeführt ist)."
     )
 
 
