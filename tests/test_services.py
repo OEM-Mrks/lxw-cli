@@ -278,7 +278,7 @@ def test_update_contact_merges_and_keeps_version(client: LexwareClient) -> None:
     put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(
         return_value=httpx.Response(200, json={"id": _CONTACT_ID, "version": 4})
     )
-    services.update_contact(
+    result = services.update_contact(
         client, _CONTACT_ID, {"company": {"name": "Neu GmbH"}}
     )
     body = json.loads(put.calls.last.request.content)
@@ -288,6 +288,10 @@ def test_update_contact_merges_and_keeps_version(client: LexwareClient) -> None:
     assert body["emailAddresses"] == {"business": ["alt@x.com"]}
     # The freshly fetched version is sent for optimistic locking.
     assert body["version"] == 3
+    # Returns the full updated object (not Lexware's bare envelope), with the
+    # new version stamped in from the PUT response.
+    assert result["company"]["name"] == "Neu GmbH"
+    assert result["version"] == 4
 
 
 @respx.mock

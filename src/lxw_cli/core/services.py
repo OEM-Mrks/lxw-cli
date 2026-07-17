@@ -567,7 +567,7 @@ def update_contact(
     """
     current = client.get(f"/v1/contacts/{contact_id}")
     merged = _merge_for_update(current, changes)
-    return client.put(f"/v1/contacts/{contact_id}", merged)
+    return _put_and_return_object(client, f"/v1/contacts/{contact_id}", merged)
 
 
 # -- Articles ---------------------------------------------------------------
@@ -625,7 +625,7 @@ def update_article(
     :func:`update_contact` (articles also use ``version`` locking)."""
     current = client.get(f"/v1/articles/{article_id}")
     merged = _merge_for_update(current, changes)
-    return client.put(f"/v1/articles/{article_id}", merged)
+    return _put_and_return_object(client, f"/v1/articles/{article_id}", merged)
 
 
 def _merge_for_update(current: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
@@ -640,6 +640,25 @@ def _merge_for_update(current: dict[str, Any], changes: dict[str, Any]) -> dict[
     if "version" in current:
         merged["version"] = current["version"]
     return merged
+
+
+def _put_and_return_object(
+    client: LexwareClient, path: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """PUT ``body`` and return the full updated object, not Lexware's envelope.
+
+    Lexware's PUT responds with only a confirmation ({id, resourceUri, version,
+    createdDate, updatedDate}). The full object we just stored is far more
+    useful to the caller, so we return ``body`` with the new version stamped
+    in — no extra GET needed.
+    """
+    result = client.put(path, body)
+    updated = dict(body)
+    if isinstance(result, dict):
+        for key in ("version", "updatedDate", "id", "resourceUri"):
+            if key in result:
+                updated[key] = result[key]
+    return updated
 
 
 def _deep_merge(base: Any, changes: Any) -> Any:
