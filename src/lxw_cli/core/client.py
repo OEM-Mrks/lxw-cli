@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from tenacity import (
@@ -97,6 +99,7 @@ class LexwareClient:
         *,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        files: Any = None,
         accept: str = "application/json",
     ) -> httpx.Response:
         self._throttle()
@@ -104,8 +107,10 @@ class LexwareClient:
         cleaned_params = (
             {k: v for k, v in params.items() if v is not None} if params else None
         )
+        # With `files`, httpx builds the multipart/form-data body and its
+        # boundary Content-Type itself — we must not pass a json body alongside.
         response = self._http.request(
-            method, path, params=cleaned_params, json=json, headers=headers
+            method, path, params=cleaned_params, json=json, files=files, headers=headers
         )
         if response.status_code == 429:
             # No sleep here — the retry decorator's _wait_for_retry reads
@@ -133,8 +138,29 @@ class LexwareClient:
     def put(self, path: str, json_body: Any) -> Any:
         return self._request("PUT", path, json=json_body).json()
 
+    def post_multipart(self, path: str, files: Any) -> Any:
+        """POST a multipart/form-data body (file upload) and return the JSON.
+
+        `files` follows httpx's format, e.g.
+        ``{"file": (filename, content_bytes, content_type)}``.
+        """
+        return self._request("POST", path, files=files).json()
+
     def get_binary(self, path: str, accept: str = "application/pdf") -> bytes:
         return self._request("GET", path, accept=accept).content
+
+    def download_file(self, path: str) -> tuple[bytes, str | None, str | None]:
+        """GET a stored file, returning (content, content_type, filename).
+
+        Unlike :meth:`get_binary` this accepts any media type (attachments may
+        be PDF, JPG or PNG) and reads the server-suggested filename from the
+        Content-Disposition header when present.
+        """
+        response = self._request("GET", path, accept="*/*")
+        content_type = response.headers.get("Content-Type")
+        if content_type:
+            content_type = content_type.split(";", 1)[0].strip() or None
+        return response.content, content_type, _filename_from_disposition(response)
 
     def paginate(
         self,
@@ -174,6 +200,24 @@ class LexwareClient:
             if payload.get("last", True):
                 return
             page += 1
+
+
+def _filename_from_disposition(response: httpx.Response) -> str | None:
+    """Extract a filename from a Content-Disposition header, if any.
+
+    Handles both ``filename="foo.pdf"`` and the RFC 5987 ``filename*=UTF-8''foo``
+    form; returns None when no usable name is present.
+    """
+    header = response.headers.get("Content-Disposition")
+    if not header:
+        return None
+    ext = re.search(r"filename\*=(?:UTF-8'')?\"?([^\";]+)\"?", header, re.IGNORECASE)
+    if ext:
+        return unquote(ext.group(1).strip())
+    plain = re.search(r'filename="?([^";]+)"?', header, re.IGNORECASE)
+    if plain:
+        return plain.group(1).strip()
+    return None
 
 
 def _parse_retry_after(response: httpx.Response) -> float | None:

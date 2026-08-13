@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import mimetypes
+from pathlib import Path
+
 import typer
 
 from lxw_cli.commands._common import ARCHIVED_HINT, load_json_arg, state
 from lxw_cli.core import services
 from lxw_cli.core.constants import DEFAULT_VOUCHER_STATUSES, DEFAULT_VOUCHER_TYPES
-from lxw_cli.output import print_count, render, working
+from lxw_cli.output import print_count, render, working, write_binary
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -119,3 +122,66 @@ def create_draft(
     with working("Lege Beleg an …"):
         result = services.create_voucher(s.client, payload)
     render(result, s.output_format, output_path=s.output_path)
+
+
+@app.command(
+    "upload-file",
+    epilog="""\
+[bold cyan]Beispiel[/bold cyan]
+
+Beleg anhängen: [green]lxw vouchers upload-file <belegnr> beleg.pdf[/green]
+""",
+)
+def upload_file(
+    ctx: typer.Context,
+    voucher: str = typer.Argument(..., help="UUID oder Belegnummer des Belegs."),
+    path: Path = typer.Argument(..., help="Pfad zur Datei (PDF/JPG/PNG)."),
+) -> None:
+    """Eine Datei (Originalbeleg) an einen Beleg anhängen.
+
+    Lädt die Datei per Multipart an /v1/vouchers/{id}/files hoch. Lexware
+    prüft Größe und Typ serverseitig (üblich: PDF, JPG, PNG) und meldet einen
+    abgelehnten Upload klar. Die Datei-id der neuen Anlage wird ausgegeben.
+    """
+    s = state(ctx)
+    if not path.is_file():
+        raise typer.BadParameter(f"Datei nicht gefunden: {path}")
+    content = path.read_bytes()
+    with working("Lade Datei hoch …"):
+        result = services.upload_voucher_file(
+            s.client, voucher, filename=path.name, content=content
+        )
+    render(result, s.output_format, output_path=s.output_path)
+
+
+@app.command(
+    "download-file",
+    epilog="""\
+[bold cyan]Beispiel[/bold cyan]
+
+Anhang laden: [green]lxw vouchers download-file <datei-id> -o ~/Belege[/green]
+""",
+)
+def download_file(
+    ctx: typer.Context,
+    file_id: str = typer.Argument(..., help="Datei-id (aus den 'files' eines Belegs)."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Ziel-Datei oder -Verzeichnis (Standard: aktuelles Verzeichnis).",
+    ),
+) -> None:
+    """Eine an einem Beleg hängende Datei herunterladen.
+
+    Die Datei-id stammt aus der 'files'-Liste eines Belegs (siehe 'get'). Ohne
+    -o landet die Datei im aktuellen Verzeichnis; zeigt -o auf ein Verzeichnis,
+    wird der Dateiname automatisch vergeben (aus dem Server-Namen bzw. Typ).
+    """
+    s = state(ctx)
+    with working("Lade Datei …"):
+        data, content_type, name = services.download_file(s.client, file_id)
+    if not name:
+        ext = mimetypes.guess_extension(content_type or "") or ""
+        name = f"beleg-{file_id}{ext}"
+    write_binary(data, output, default_name=name)
