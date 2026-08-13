@@ -456,6 +456,39 @@ Hinweise für den Betrieb:
 Text + die Empfänger-Adresse (`david@oemedia.de`) zurück, den der Nutzer selbst
 per E-Mail sendet. Der Server verschickt nichts.
 
+#### Zugang auf bekannte Installationen beschränken (KYC-Allow-List)
+
+Standardmäßig darf **jeder mit einem gültigen Lexware-Key** den Server nutzen.
+Soll er nur **bekannte** Lexware-Installationen bedienen (KYC, Basis für ein
+Bezahlmodell), gibt es ein Allow-List-Gate. Es identifiziert eine Installation
+über die `organizationId` aus dem Lexware-Profil (stabil pro Firma) und ist
+standardmäßig **aus** — ohne Konfiguration ändert sich nichts.
+
+Drei Modi über `LXW_MCP_ALLOWLIST_MODE`:
+
+- `off` (Standard) — Gate inaktiv, kein zusätzlicher Profil-Abruf.
+- `log` — jede anrufende Organisation wird in `<data_dir>/pending.json`
+  protokolliert, **nichts wird blockiert**. Damit findet man ohne Aussperr-
+  Risiko heraus, welche Installationen den Dienst tatsächlich nutzen, und baut
+  daraus die Allow-List.
+- `enforce` — Organisationen, die **nicht** freigeschaltet sind, werden
+  abgewiesen; unbekannte landen weiterhin in `pending.json` (Onboarding-Queue).
+
+Freischalten (beide Quellen werden gemischt):
+
+- `LXW_MCP_ALLOWLIST` — kommaseparierte `organizationId`s inline, **oder**
+- `<data_dir>/allowlist.json` — JSON-Array `["org-id", …]` oder Objekt
+  `{"org-id": {"note": "Kunde X"}}`. Wird bei Änderung **automatisch neu
+  geladen** (Kunde freischalten ohne Neustart).
+
+Weitere Schalter: `LXW_MCP_ALLOWLIST_CONTACT` (Adresse in der Ablehn-Meldung),
+`LXW_MCP_ALLOWLIST_TTL` (Sekunden Cache für Key→Org-Auflösung, Standard 600),
+`LXW_MCP_ALLOWLIST_FAIL_OPEN=1` (bei nicht erreichbarer Lexware-API durchlassen
+statt sperren; Standard ist im `enforce`-Modus fail-closed).
+
+Empfohlener Rollout: erst `log` fahren, `pending.json` sichten, bekannte Orgs in
+`allowlist.json` übernehmen, dann auf `enforce` umstellen.
+
 ## Out of Scope (v1)
 
 Bewusst nicht enthalten:
