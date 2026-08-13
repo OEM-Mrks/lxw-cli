@@ -115,6 +115,31 @@ def get_invoice(
 
 
 @app.command(
+    "payment",
+    epilog="""\
+[bold cyan]Beispiel[/bold cyan]
+
+Zahlstatus: [green]lxw invoices payment FB2600682[/green]
+""",
+)
+def payment_status(
+    ctx: typer.Context,
+    invoice: str = typer.Argument(..., help="UUID oder Rechnungsnummer (z.B. FB2600682)."),
+) -> None:
+    """Zahlstatus einer Rechnung abrufen.
+
+    Zeigt den noch offenen Betrag, den Zahlstatus (open/paidoff/voided), das
+    Datum des Ausgleichs und die einzelnen Zahlungen. Akzeptiert UUID oder
+    Rechnungsnummer und funktioniert auch für andere Verkaufsbelege
+    (z.B. Rechnungskorrekturen).
+    """
+    s = state(ctx)
+    with working("Lade Zahlstatus …"):
+        data = services.get_payment_status(s.client, invoice)
+    render(data, s.output_format, output_path=s.output_path)
+
+
+@app.command(
     "pdf",
     epilog="""\
 [bold cyan]Beispiele[/bold cyan]

@@ -113,6 +113,69 @@ def _pdf_result(data: bytes, output_dir: str | None, filename: str) -> str | Fil
     return str(target.resolve())
 
 
+def _ext_from_content_type(content_type: str | None) -> str | None:
+    if not content_type:
+        return None
+    import mimetypes
+
+    ext = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
+    return ext.lstrip(".") if ext else None
+
+
+def _file_result(
+    data: bytes,
+    output_dir: str | None,
+    filename: str,
+    content_type: str | None = None,
+) -> str | File:
+    """Return an arbitrary downloaded file — inline over HTTP, saved on stdio.
+
+    Like :func:`_pdf_result` but for any media type (attachments may be PDF,
+    JPG or PNG). A missing extension is filled in from the content type so the
+    saved file / inline resource carries a sensible name.
+    """
+    name = safe_filename(filename)
+    ext_from_ct = _ext_from_content_type(content_type)
+    if "." not in name and ext_from_ct:
+        name = f"{name}.{ext_from_ct}"
+    if _in_http_request():
+        stem, _, ext = name.rpartition(".") if "." in name else (name, "", "")
+        return File(data=data, name=stem or name, format=ext or ext_from_ct or "bin")
+    target_dir = Path(output_dir).expanduser() if output_dir else _default_download_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / name
+    target.write_bytes(data)
+    return str(target.resolve())
+
+
+def _resolve_upload(
+    file_path: str | None, file_base64: str | None, filename: str | None
+) -> tuple[bytes, str]:
+    """Turn the caller's upload inputs into (content_bytes, filename).
+
+    Over stdio the file lives on the local disk (`file_path`); over HTTP the
+    server can't see the caller's disk, so the bytes arrive as `file_base64`
+    (with an explicit `filename`).
+    """
+    if file_base64:
+        import base64
+
+        try:
+            content = base64.b64decode(file_base64, validate=True)
+        except Exception as exc:  # noqa: BLE001 — report as a clean tool error
+            raise ValueError("file_base64 ist kein gültiges Base64.") from exc
+        return content, safe_filename(filename or "anhang")
+    if file_path:
+        source = Path(file_path).expanduser()
+        if not source.is_file():
+            raise ValueError(f"Datei nicht gefunden: {source}")
+        return source.read_bytes(), safe_filename(filename or source.name)
+    raise ValueError(
+        "Bitte eine Datei angeben: file_path (lokale Datei) oder file_base64 "
+        "zusammen mit filename."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
@@ -172,6 +235,19 @@ def list_invoices(
 def get_invoice(identifier: str) -> dict[str, Any]:
     """Get invoice details by UUID or invoice number (e.g. 'FB2600682')."""
     return services.get_invoice(_client_get(), identifier)
+
+
+@mcp.tool
+def get_payment_status(identifier: str) -> dict[str, Any]:
+    """Show whether an invoice is paid and how much is still open.
+
+    Use this to answer "is invoice X paid?" / "what's still open on X?".
+    Accepts an invoice number (e.g. 'FB2600682') or id — also works for other
+    sales vouchers like credit notes. Returns the still-open amount, the
+    payment state (open / paid off / voided), the date it was paid off and the
+    individual recorded payments.
+    """
+    return services.get_payment_status(_client_get(), identifier)
 
 
 @mcp.tool
@@ -253,6 +329,21 @@ def list_vouchers(
 def get_voucher(identifier: str) -> dict[str, Any]:
     """Get a voucher's details by UUID or voucher number. Searches all voucher types."""
     return services.get_voucher(_client_get(), identifier)
+
+
+@mcp.tool
+def list_posting_categories(category_type: str | None = None) -> list[dict[str, Any]]:
+    """List the bookkeeping categories available in this account.
+
+    These are the categories a bookkeeping voucher is assigned to (e.g.
+    revenue/income vs. expense categories). Use this to pick the right category
+    when recording a receipt or purchase, and to answer "which categories can I
+    book to?". `category_type` optionally narrows the list to one kind (income
+    or expense). Returns each category's id and name.
+    """
+    return services.list_posting_categories(
+        _client_get(), category_type=category_type
+    )
 
 
 @mcp.tool
@@ -393,6 +484,28 @@ def download_delivery_note_pdf(identifier: str, output_dir: str | None = None) -
     return _pdf_result(data, output_dir, f"deliverynote-{identifier}.pdf")
 
 
+@mcp.tool
+def get_dunning(dunning_id: str) -> dict[str, Any]:
+    """Get a dunning (payment reminder) by its id.
+
+    A dunning can only be addressed by its id — take it from the result when
+    the dunning was created, or from the related documents of the invoice it
+    belongs to. (Dunnings cannot be listed or looked up by a number.)
+    """
+    return services.get_dunning(_client_get(), dunning_id)
+
+
+@mcp.tool
+def download_dunning_pdf(dunning_id: str, output_dir: str | None = None) -> str | File:
+    """Download a dunning's PDF by its id.
+
+    stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
+    Only finalized dunnings have a PDF.
+    """
+    data = services.download_dunning_pdf(_client_get(), dunning_id)
+    return _pdf_result(data, output_dir, f"dunning-{dunning_id}.pdf")
+
+
 # ---------------------------------------------------------------------------
 # Write tools — master data is created directly; documents are created as
 # drafts (never finalized).
@@ -443,6 +556,40 @@ def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
 def create_voucher_draft(body: dict[str, Any]) -> dict[str, Any]:
     """Create a generic voucher (for bookkeeping / purchase invoices)."""
     return services.create_voucher(_client_get(), body)
+
+
+@mcp.tool
+def upload_voucher_file(
+    identifier: str,
+    file_path: str | None = None,
+    file_base64: str | None = None,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Attach a file (the original receipt/document) to a bookkeeping voucher.
+
+    Use this to add the scan/PDF of a receipt to a voucher after creating it.
+    `identifier` is the voucher's number or id. Provide the file either as a
+    local `file_path` (when running on the user's machine) OR as `file_base64`
+    together with a `filename`. Accepted files are typically PDF, JPG or PNG;
+    the system enforces its own size limit and reports clearly if a file is
+    rejected. Returns a reference to the stored attachment.
+    """
+    content, name = _resolve_upload(file_path, file_base64, filename)
+    return services.upload_voucher_file(
+        _client_get(), identifier, filename=name, content=content
+    )
+
+
+@mcp.tool
+def download_voucher_file(file_id: str, output_dir: str | None = None) -> str | File:
+    """Download a stored file (e.g. a voucher's attached receipt) by its file id.
+
+    File ids appear in a voucher's list of attached files. Over stdio the file
+    is saved to ~/Downloads/lexware/ (or output_dir) and the path is returned;
+    over HTTP the file is returned inline and output_dir is ignored.
+    """
+    data, content_type, name = services.download_file(_client_get(), file_id)
+    return _file_result(data, output_dir, name or f"beleg-{file_id}", content_type)
 
 
 @mcp.tool
@@ -530,6 +677,21 @@ def continue_document(identifier: str, target: str) -> dict[str, Any]:
     Lexware directly). Unsupported steps are reported clearly.
     """
     return services.continue_document(_client_get(), identifier, target)
+
+
+@mcp.tool
+def create_dunning(identifier: str) -> dict[str, Any]:
+    """Create a dunning (Mahnung / payment reminder) from an overdue invoice.
+
+    Use when the user wants to remind a customer about an unpaid invoice.
+    `identifier` is the invoice's number (e.g. 'FB2600682') or id. The invoice
+    must already be finalized and still have an open amount — otherwise this
+    reports the reason clearly. The dunning is created as a draft and stays
+    linked to the invoice; creating another one for the same invoice raises the
+    reminder to the next level. Note the returned id — a dunning can only be
+    opened again by its id, not by a number.
+    """
+    return services.create_dunning(_client_get(), identifier)
 
 
 @mcp.tool

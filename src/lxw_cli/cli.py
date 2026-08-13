@@ -11,8 +11,10 @@ from lxw_cli.commands import (
     articles,
     contacts,
     delivery_notes,
+    dunnings,
     invoices,
     orders,
+    posting_categories,
     quotations,
     vouchers,
 )
@@ -149,7 +151,15 @@ app.add_typer(
 app.add_typer(
     vouchers.app,
     name="vouchers",
-    help="Belege: list/get/create-draft. Listen mit --type/--status/--number, --all.",
+    help=(
+        "Belege: list/get/create-draft, Anhänge mit upload-file/download-file. "
+        "Listen mit --type/--status/--number, --all."
+    ),
+)
+app.add_typer(
+    posting_categories.app,
+    name="posting-categories",
+    help="Buchungskategorien: list (mit --type). ids für create-draft-Positionen.",
 )
 app.add_typer(
     articles.app,
@@ -168,6 +178,11 @@ app.add_typer(
     delivery_notes.app,
     name="delivery-notes",
     help="Lieferscheine: list/get/pdf/create-draft, --all.",
+)
+app.add_typer(
+    dunnings.app,
+    name="dunnings",
+    help="Mahnungen: create (aus Rechnung), get/pdf (nur per id — kein Listing).",
 )
 app.add_typer(mcp_cmd.app, name="mcp", help="MCP-Server-Integration für Claude.")
 

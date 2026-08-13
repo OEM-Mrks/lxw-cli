@@ -127,6 +127,53 @@ def test_wait_for_retry_uses_retry_after_once() -> None:
 
 
 @respx.mock
+def test_post_multipart_sends_file(client: LexwareClient) -> None:
+    route = respx.post("https://api.lexware.io/v1/vouchers/abc/files").mock(
+        return_value=httpx.Response(200, json={"id": "file-1"})
+    )
+    result = client.post_multipart(
+        "/v1/vouchers/abc/files",
+        files={"file": ("beleg.pdf", b"%PDF-1.7 x", "application/pdf")},
+    )
+    assert result == {"id": "file-1"}
+    request = route.calls.last.request
+    assert request.headers["Content-Type"].startswith("multipart/form-data")
+    body = request.content
+    assert b"beleg.pdf" in body
+    assert b"%PDF-1.7 x" in body
+
+
+@respx.mock
+def test_download_file_reads_type_and_name(client: LexwareClient) -> None:
+    respx.get("https://api.lexware.io/v1/files/xyz").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"\x89PNG fake",
+            headers={
+                "Content-Type": "image/png; charset=binary",
+                "Content-Disposition": 'attachment; filename="scan.png"',
+            },
+        )
+    )
+    content, content_type, name = client.download_file("/v1/files/xyz")
+    assert content == b"\x89PNG fake"
+    assert content_type == "image/png"  # charset stripped
+    assert name == "scan.png"
+
+
+@respx.mock
+def test_download_file_without_disposition(client: LexwareClient) -> None:
+    respx.get("https://api.lexware.io/v1/files/xyz").mock(
+        return_value=httpx.Response(
+            200, content=b"data", headers={"Content-Type": "application/pdf"}
+        )
+    )
+    content, content_type, name = client.download_file("/v1/files/xyz")
+    assert content_type == "application/pdf"
+    assert name is None
+
+
+@respx.mock
 def test_non_2xx_raises(client: LexwareClient) -> None:
     respx.get("https://api.lexware.io/v1/invoices/xxx").mock(
         return_value=httpx.Response(404, json={"message": "not found"})

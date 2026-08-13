@@ -166,6 +166,84 @@ def test_create_contact_posts_body(client: LexwareClient) -> None:
     assert route.called
 
 
+# -- Beleg-Anhänge + Buchungskategorien --------------------------------------
+
+_POSTING = "https://api.lexware.io/v1/posting-categories"
+
+
+@respx.mock
+def test_upload_voucher_file_posts_multipart(client: LexwareClient) -> None:
+    # A UUID identifier is used verbatim — no voucherlist lookup needed.
+    route = respx.post(f"https://api.lexware.io/v1/vouchers/{_UUID}/files").mock(
+        return_value=httpx.Response(201, json={"id": "file-1"})
+    )
+    result = services.upload_voucher_file(
+        client, _UUID, filename="beleg.pdf", content=b"%PDF-1.7 x"
+    )
+    assert result == {"id": "file-1"}
+    body = route.calls.last.request.content
+    assert b"beleg.pdf" in body
+    assert b"%PDF-1.7 x" in body
+    assert b"application/pdf" in body  # content type guessed from extension
+
+
+@respx.mock
+def test_download_file_returns_bytes_type_name(client: LexwareClient) -> None:
+    respx.get("https://api.lexware.io/v1/files/f1").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"img",
+            headers={
+                "Content-Type": "image/png",
+                "Content-Disposition": 'inline; filename="a.png"',
+            },
+        )
+    )
+    assert services.download_file(client, "f1") == (b"img", "image/png", "a.png")
+
+
+@respx.mock
+def test_list_posting_categories_array_and_filter(client: LexwareClient) -> None:
+    respx.get(_POSTING).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": "c1", "name": "Erlöse", "type": "income"},
+                {"id": "c2", "name": "Wareneinkauf", "type": "expense"},
+            ],
+        )
+    )
+    all_cats = services.list_posting_categories(client)
+    assert [c["id"] for c in all_cats] == ["c1", "c2"]
+    income = services.list_posting_categories(client, category_type="income")
+    assert [c["id"] for c in income] == ["c1"]
+
+
+@respx.mock
+def test_get_payment_status_resolves_number(client: LexwareClient) -> None:
+    respx.get(_VOUCHERLIST, params={"voucherNumber": "FB1"}).mock(
+        return_value=httpx.Response(
+            200,
+            json={"content": [{"id": "uuid1", "voucherNumber": "FB1"}], "last": True},
+        )
+    )
+    respx.get("https://api.lexware.io/v1/payments/uuid1").mock(
+        return_value=httpx.Response(200, json={"paymentStatus": "paidoff", "openAmount": 0})
+    )
+    data = services.get_payment_status(client, "FB1")
+    assert data["paymentStatus"] == "paidoff"
+
+
+@respx.mock
+def test_get_payment_status_uuid_skips_lookup(client: LexwareClient) -> None:
+    route = respx.get(f"https://api.lexware.io/v1/payments/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"paymentStatus": "open", "openAmount": 71.4})
+    )
+    data = services.get_payment_status(client, _UUID)
+    assert data["openAmount"] == 71.4
+    assert route.called
+
+
 # -- Order confirmations (Aufträge) -------------------------------------------
 
 
@@ -496,3 +574,72 @@ def test_continue_draft_reports_finalize_requirement(client: LexwareClient) -> N
     )
     with pytest.raises(LexwareError, match="festgeschrieben"):
         services.continue_document(client, "AB-1", "Rechnung")
+
+
+# -- Dunnings (Mahnungen) ----------------------------------------------------
+
+_DUNNINGS = "https://api.lexware.io/v1/dunnings"
+
+
+@respx.mock
+def test_create_dunning_pursues_invoice(client: LexwareClient) -> None:
+    _mock_voucherlist("FB1", "salesinvoice")  # invoices report as salesinvoice
+    respx.get(f"{_INVOICES}/{_SRCID}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": _SRCID,
+                "address": {"contactId": "c"},
+                "lineItems": [
+                    {"id": "li-1", "type": "service", "name": "Pos",
+                     "lineItemAmount": 10.0}
+                ],
+                "taxConditions": {"taxType": "net"},
+                "totalPrice": {"currency": "EUR"},
+                "title": "Rechnung",
+                "introduction": "…in Rechnung.",
+                "remark": "Danke.",
+            },
+        )
+    )
+    route = respx.post(_DUNNINGS).mock(return_value=httpx.Response(201, json={"id": "dun-1"}))
+    result = services.create_dunning(client, "FB1")
+    assert result["id"] == "dun-1"
+    req = route.calls.last.request
+    assert f"precedingSalesVoucherId={_SRCID}" in str(req.url)
+    body = json.loads(req.content)
+    # A dunning references the invoice's positions by id (kept), but computed
+    # amounts are still dropped.
+    assert body["lineItems"][0]["id"] == "li-1"
+    assert "lineItemAmount" not in body["lineItems"][0]
+    # The invoice's title/intro/closing text must NOT leak onto the dunning —
+    # Lexware fills its own dunning wording.
+    assert "title" not in body
+    assert "introduction" not in body
+    assert "remark" not in body
+
+
+def test_get_dunning_rejects_a_number(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    # A voucher number can't be resolved to a dunning — fail early, no HTTP call.
+    with pytest.raises(LexwareError, match="nur über ihre id"):
+        services.get_dunning(client, "MA-1")
+
+
+@respx.mock
+def test_get_dunning_by_uuid(client: LexwareClient) -> None:
+    respx.get(f"{_DUNNINGS}/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID, "voucherStatus": "draft"})
+    )
+    assert services.get_dunning(client, _UUID)["id"] == _UUID
+
+
+@respx.mock
+def test_download_dunning_pdf_by_uuid(client: LexwareClient) -> None:
+    respx.get(f"{_DUNNINGS}/{_UUID}/file").mock(
+        return_value=httpx.Response(200, content=b"%PDF-dun")
+    )
+    assert services.download_dunning_pdf(client, _UUID) == b"%PDF-dun"

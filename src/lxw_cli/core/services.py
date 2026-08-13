@@ -8,6 +8,7 @@ raise :class:`LexwareError` subclasses on failure.
 
 from __future__ import annotations
 
+import mimetypes
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -322,6 +323,86 @@ def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any
     return client.post("/v1/vouchers", body)
 
 
+# -- Beleg-Anhänge (voucher file attachments) -------------------------------
+
+
+def upload_voucher_file(
+    client: LexwareClient,
+    identifier: str,
+    *,
+    filename: str,
+    content: bytes,
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    """Attach a file (receipt/original document) to a voucher.
+
+    `identifier` is a voucher UUID or number; it is resolved to the voucher's
+    id and the file is POSTed as multipart/form-data to
+    ``/v1/vouchers/{id}/files``. The content type is guessed from `filename`
+    when not given. Lexware enforces its own size/type limits (typically PDF,
+    JPG, PNG) and returns the created file's id — surfaced verbatim so the API
+    stays the single source of truth for what is accepted.
+    """
+    voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
+    ctype = (
+        content_type
+        or mimetypes.guess_type(filename)[0]
+        or "application/octet-stream"
+    )
+    return client.post_multipart(
+        f"/v1/vouchers/{voucher_id}/files",
+        files={"file": (filename, content, ctype)},
+    )
+
+
+def download_file(
+    client: LexwareClient, file_id: str
+) -> tuple[bytes, str | None, str | None]:
+    """Download a stored file by its id, returning (bytes, content_type, name).
+
+    File ids are the entries in a voucher's/document's ``files`` list (e.g. an
+    attached receipt or the rendered document PDF).
+    """
+    return client.download_file(f"/v1/files/{file_id}")
+
+
+# -- Zahlstatus (payments) --------------------------------------------------
+
+
+def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]:
+    """Return the payment status of a sales voucher (invoice / credit note).
+
+    Resolves `identifier` (voucher number like 'FB2600682' or a UUID) to its
+    id and reads ``/v1/payments/{id}``. The response carries the open amount,
+    the ``paymentStatus`` (open / paidoff / voided), when it was paid off
+    (``paidDate``) and the individual ``paymentItems``.
+    """
+    voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
+    return client.get(f"/v1/payments/{voucher_id}")
+
+
+# -- Buchungskategorien (posting categories) --------------------------------
+
+
+def list_posting_categories(
+    client: LexwareClient, *, category_type: str | None = None
+) -> list[dict[str, Any]]:
+    """List the account's bookkeeping categories (Buchungskategorien).
+
+    Returns the fixed catalog Lexware exposes at ``/v1/posting-categories``
+    (a plain array, not paginated). Each entry carries at least ``id``,
+    ``name`` and ``type`` (income vs. expense). `category_type`, when given,
+    filters client-side by exact ``type`` match. These ids are what a
+    bookkeeping voucher's items reference via ``categoryId``.
+    """
+    data = client.get("/v1/posting-categories")
+    items = data if isinstance(data, list) else (data.get("content") or [])
+    if category_type:
+        wanted = category_type.strip().casefold()
+        items = [c for c in items if str(c.get("type", "")).casefold() == wanted]
+    return items
+
+
 # -- Quotations -------------------------------------------------------------
 
 
@@ -509,6 +590,7 @@ _DOC_META: dict[str, dict[str, str]] = {
     "deliverynote": {"label": "Lieferschein", "path": "/v1/delivery-notes/{id}"},
     "invoice": {"label": "Rechnung", "path": "/v1/invoices/{id}"},
     "creditnote": {"label": "Rechnungskorrektur", "path": "/v1/credit-notes/{id}"},
+    "dunning": {"label": "Mahnung", "path": "/v1/dunnings/{id}"},
 }
 
 # The follow-up transitions Lexware's API supports (mirrors the web app's
@@ -531,6 +613,7 @@ _PURSUE_MATRIX: dict[str, dict[str, str]] = {
     "invoice": {
         "deliverynote": "/v1/delivery-notes",
         "creditnote": "/v1/credit-notes",
+        "dunning": "/v1/dunnings",
     },
 }
 
@@ -552,6 +635,9 @@ _TARGET_ALIASES = {
     "korrektur": "creditnote",
     "creditnote": "creditnote",
     "credit_note": "creditnote",
+    "mahnung": "dunning",
+    "zahlungserinnerung": "dunning",
+    "dunning": "dunning",
 }
 
 # Targets a user may ask for that the API cannot create (only the web app can).
@@ -585,6 +671,9 @@ _PURSUE_DROP_DOC = {
     "electronicDocumentProfile",
 }
 _PURSUE_DROP_LINEITEM = {"id", "lineItemAmount"}
+# Document-level texts that must not carry over onto a dunning — Lexware fills
+# its own dunning title/wording, so the invoice's would otherwise leak through.
+_PURSUE_DROP_DUNNING = frozenset({"title", "introduction", "remark"})
 
 
 def continue_document(
@@ -611,7 +700,7 @@ def continue_document(
     if target_type is None:
         raise LexwareError(
             f"Unbekanntes Ziel '{target}'. Möglich sind: Auftrag, Lieferschein, "
-            "Rechnung oder Rechnungskorrektur."
+            "Rechnung, Rechnungskorrektur oder Mahnung."
         )
 
     source_type, source_id, source = _resolve_source(client, identifier)
@@ -625,7 +714,16 @@ def continue_document(
             f"weitergeführt werden. Von hier möglich: {options}."
         )
 
-    body = _pursue_body(source)
+    # A dunning is special: it references the invoice's existing line items by
+    # their id (so the per-item `id` must be kept), and it must NOT inherit the
+    # invoice's title/intro/closing text — Lexware applies its own dunning
+    # wording, so those are dropped to avoid "Rechnung" leaking onto a Mahnung.
+    is_dunning = target_type == "dunning"
+    body = _pursue_body(
+        source,
+        keep_line_item_ids=is_dunning,
+        extra_doc_drops=_PURSUE_DROP_DUNNING if is_dunning else frozenset(),
+    )
     try:
         return client.post(
             target_path, body, params={"precedingSalesVoucherId": source_id}
@@ -731,18 +829,33 @@ def _pursue_error(exc: LexwareAPIError, source_type: str, target_type: str) -> s
     )
 
 
-def _pursue_body(source: dict[str, Any]) -> dict[str, Any]:
+def _pursue_body(
+    source: dict[str, Any],
+    *,
+    keep_line_item_ids: bool = False,
+    extra_doc_drops: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """Turn a fetched document into a fresh create-body for its follow-up.
 
     Drops server-managed/computed fields, re-dates the document to today, keeps
     only the currency on ``totalPrice`` (amounts are recomputed server-side),
     and strips per-line-item ids/amounts. Content (address, line items, tax /
     shipping / payment conditions, texts, language) carries over unchanged.
+
+    ``keep_line_item_ids`` retains each line item's ``id`` — required when
+    pursuing to a dunning, which references the invoice's existing positions by
+    id rather than creating new ones (Lexware rejects empty line-item ids there).
+    ``extra_doc_drops`` removes additional document-level fields (e.g. a
+    dunning must not inherit the invoice's title/introduction/remark).
     """
-    body = {k: v for k, v in source.items() if k not in _PURSUE_DROP_DOC}
+    drop_line_item = _PURSUE_DROP_LINEITEM
+    if keep_line_item_ids:
+        drop_line_item = drop_line_item - {"id"}
+    doc_drops = _PURSUE_DROP_DOC | extra_doc_drops
+    body = {k: v for k, v in source.items() if k not in doc_drops}
     body["voucherDate"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
     body["lineItems"] = [
-        {k: v for k, v in item.items() if k not in _PURSUE_DROP_LINEITEM}
+        {k: v for k, v in item.items() if k not in drop_line_item}
         for item in (body.get("lineItems") or [])
     ]
     currency = (source.get("totalPrice") or {}).get("currency", "EUR")
@@ -755,6 +868,56 @@ def _pursue_body(source: dict[str, Any]) -> dict[str, Any]:
     if not body.get("shippingConditions"):
         body["shippingConditions"] = {"shippingType": "none"}
     return body
+
+
+# -- Dunnings (Mahnungen) ---------------------------------------------------
+#
+# The Lexware API has no way to *list* dunnings: /v1/voucherlist rejects
+# voucherType=dunning (HTTP 400) and there is no /v1/dunnings collection GET.
+# So dunnings are addressable only by id — obtained when the dunning is created
+# or from the originating invoice's related documents. Creating one is a
+# Belegkette pursue (invoice → dunning), reusing continue_document.
+
+
+def create_dunning(client: LexwareClient, identifier: str) -> dict[str, Any]:
+    """Create a dunning (Mahnung) from an overdue invoice, keeping both linked.
+
+    `identifier` is the invoice's number or id. Delegates to the pursue logic
+    (invoice → dunning): the invoice must be finalized and still have an open
+    amount, otherwise a clear message is returned instead of a raw HTTP error.
+    The dunning is created as a draft; repeating the call escalates Lexware's
+    dunning level. Returns the new dunning (its id is the only later handle).
+    """
+    return continue_document(client, identifier, "dunning")
+
+
+def get_dunning(client: LexwareClient, dunning_id: str) -> dict[str, Any]:
+    """Get a dunning by its id (dunnings cannot be looked up by number)."""
+    _require_dunning_id(dunning_id)
+    return client.get(f"/v1/dunnings/{dunning_id}")
+
+
+def download_dunning_pdf(client: LexwareClient, dunning_id: str) -> bytes:
+    """Download a dunning's PDF by its id (finalized dunnings only)."""
+    _require_dunning_id(dunning_id)
+    return get_pdf_with_voucher_fallback(
+        client, f"/v1/dunnings/{dunning_id}/file", dunning_id
+    )
+
+
+def _require_dunning_id(value: str) -> None:
+    """Guard: dunnings are addressable only by id, never by a voucher number.
+
+    Unlike invoices etc., dunnings are absent from /v1/voucherlist, so a number
+    cannot be resolved to an id. Fail early with guidance instead of letting a
+    number fall through to a confusing 404.
+    """
+    if not looks_like_uuid(value):
+        raise LexwareError(
+            "Eine Mahnung lässt sich nur über ihre id abrufen (nicht über eine "
+            "Belegnummer). Die id steht im Ergebnis beim Erstellen der Mahnung "
+            "oder bei den verknüpften Belegen der zugehörigen Rechnung."
+        )
 
 
 # -- Contacts ---------------------------------------------------------------

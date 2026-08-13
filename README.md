@@ -10,7 +10,11 @@ Ein Kommandozeilen-Tool für die [Lexware Office API](https://developers.lexware
 
 - Zwei Frontends auf einem UI-freien Core: **CLI** (skriptbar) und **interaktive TUI** (`lxw` ohne Argumente)
 - Lesen: `list` (paginiert + Filter), `get` (Detail), `pdf` (Download)
+- Zahlstatus: offener Betrag, bezahlt/offen/storniert und einzelne Zahlungen zu einer Rechnung (`invoices payment`)
+- Mahnungen: aus einer überfälligen Rechnung erstellen (`dunnings create`), abrufen und als PDF laden (nur per id)
 - Schreiben: `create-draft` für Belege (Rechnungen, Angebote, Aufträge, Lieferscheine, Belege), `create` für Stammdaten (Kontakte, Artikel)
+- Beleg-Anhänge: Originalbelege (PDF/JPG/PNG) an einen Beleg anhängen und angehängte Dateien wieder herunterladen
+- Buchungskategorien auflisten (die `id` referenzieren Beleg-Positionen als `categoryId`)
 - Paginierung: `--limit N`, `--all`/`-a` bzw. `--limit 0` für **alle** Treffer über alle Seiten
 - Artikel-Volltextsuche: `articles list --search/-q` (Bezeichnung, Beschreibung, Teil-Artikelnummer)
 - Kontakte: `--customer` / `--vendor` (nur Kunden/Lieferanten), optional `--grouped`
@@ -174,13 +178,15 @@ lxw invoices create-draft --body @invoice-template.json
 | Befehl | Zweck |
 |---|---|
 | `lxw profile` | Firmenprofil abrufen (Auth-Test) |
-| `lxw invoices` | Rechnungen: `list`, `get`, `pdf`, `create-draft` |
+| `lxw invoices` | Rechnungen: `list`, `get`, `payment`, `pdf`, `create-draft` |
 | `lxw contacts` | Kontakte: `list`, `get`, `create` |
-| `lxw vouchers` | Belege: `list`, `get`, `create-draft` |
+| `lxw vouchers` | Belege: `list`, `get`, `create-draft`, `upload-file`, `download-file` |
+| `lxw posting-categories` | Buchungskategorien: `list` (mit `--type`) |
 | `lxw articles` | Artikel: `list`, `get`, `create` (mit Volltextsuche) |
 | `lxw quotations` | Angebote: `list`, `get`, `pdf`, `create-draft` |
 | `lxw orders` | Aufträge (Auftragsbestätigungen): `list`, `get`, `pdf`, `create-draft` |
 | `lxw delivery-notes` | Lieferscheine: `list`, `get`, `pdf`, `create-draft` |
+| `lxw dunnings` | Mahnungen: `create` (aus Rechnung), `get`, `pdf` (nur per id) |
 
 Hinweis: `create-draft` legt **Belege** als Entwurf an (Draft, nicht finalisiert);
 **Stammdaten** (Kontakte, Artikel) kennen keinen Draft-Status und werden mit
@@ -371,23 +377,25 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 
 ### Verfügbare MCP-Tools
 
-31 Tools mit identischem Verhalten wie die CLI-Befehle:
+38 Tools mit identischem Verhalten wie die CLI-Befehle:
 
 - **Info**: `version` (meldet die laufende Version + Build-Zeitstempel — nützlich, wenn eine Client-UI wie ChatGPT eine gecachte/alte Version anzeigt)
 - **Belegkette (weiterführen)**: `continue_document` führt einen Beleg in den Folgebeleg fort und hält beide verknüpft (`precedingSalesVoucherId`). Der Quelltyp wird automatisch erkannt (Belegnummer oder id). Unterstützte Wege (wie in Lexware):
   - **Angebot** → Auftrag · Lieferschein · Rechnung
   - **Auftrag** → Lieferschein · Rechnung
   - **Lieferschein** → Rechnung
-  - **Rechnung** → Lieferschein · Rechnungskorrektur
+  - **Rechnung** → Lieferschein · Rechnungskorrektur · Mahnung
 
-  Inhalte (Kunde, Positionen, Texte) werden übernommen, der Folgebeleg entsteht als Entwurf. Für Rechnung/Rechnungskorrektur muss der Ausgangsbeleg **festgeschrieben** sein (sonst klare Meldung statt HTTP 406). **Abschlagsrechnung** und **Serienrechnung** sind über die Lexware-API nicht erstellbar — das meldet das Tool klar.
-- **Lesen**: `profile`, `list_invoices`, `get_invoice`, `download_invoice_pdf`, `list_contacts`, `get_contact`, `list_vouchers`, `get_voucher`, `list_articles`, `get_article`, `list_quotations`, `get_quotation`, `download_quotation_pdf`, `list_order_confirmations`, `get_order_confirmation`, `download_order_confirmation_pdf`, `list_delivery_notes`, `get_delivery_note`, `download_delivery_note_pdf`
+  Inhalte (Kunde, Positionen, Texte) werden übernommen, der Folgebeleg entsteht als Entwurf. Für Rechnung/Rechnungskorrektur/Mahnung muss der Ausgangsbeleg **festgeschrieben** sein (sonst klare Meldung statt HTTP 406). **Abschlagsrechnung** und **Serienrechnung** sind über die Lexware-API nicht erstellbar — das meldet das Tool klar.
+- **Mahnungen**: `create_dunning` erstellt aus einer überfälligen (festgeschriebenen, noch offenen) Rechnung eine Mahnung als Entwurf — ein erneuter Aufruf erhöht die Mahnstufe. `get_dunning` und `download_dunning_pdf` rufen eine Mahnung ab. **Nur per id** ansprechbar: Mahnungen sind in der Lexware-API nicht auflistbar (kein Listing, keine Belegnummer-Suche); die id stammt aus dem Erstellen oder den verknüpften Belegen der Rechnung.
+- **Lesen**: `profile`, `list_invoices`, `get_invoice`, `get_payment_status`, `download_invoice_pdf`, `list_contacts`, `get_contact`, `list_vouchers`, `get_voucher`, `list_posting_categories`, `list_articles`, `get_article`, `list_quotations`, `get_quotation`, `download_quotation_pdf`, `list_order_confirmations`, `get_order_confirmation`, `download_order_confirmation_pdf`, `list_delivery_notes`, `get_delivery_note`, `download_delivery_note_pdf`
 - **Belege als Draft anlegen**: `create_invoice_draft`, `create_voucher_draft`, `create_quotation_draft`, `create_order_confirmation_draft`, `create_delivery_note_draft`
+- **Beleg-Anhänge**: `upload_voucher_file` hängt einen Originalbeleg (PDF/JPG/PNG) an einen Beleg (lokaler Pfad oder Base64), `download_voucher_file` lädt eine angehängte Datei über ihre id herunter. Größe/Typ prüft Lexware serverseitig.
 - **Stammdaten anlegen** (kein Draft): `create_contact`, `create_article`
 - **Stammdaten bearbeiten** (Teil-Update mit Auto-Merge + automatischem `version`-Handling): `update_contact`, `update_article`. Es werden nur die übergebenen Felder geändert; verschachtelte Objekte werden feldweise zusammengeführt, Listen komplett ersetzt. (Kontakt-`archived` ist in der Lexware-API read-only und kann nicht per API gesetzt werden. Firmen-Kontakte mit **mehr als einem Ansprechpartner** lassen sich per Lexware-API grundsätzlich nicht aktualisieren — `update_contact` meldet das klar, statt eines rohen HTTP 406.)
 - **Funktionswunsch melden**: `request_feature` erstellt einen **unverbindlichen** Feature-Wunsch als fertigen Text (`subject`/`body`) samt Anbieter-Adresse (`to` = david@oemedia.de). Der Server **versendet nichts** — der Nutzer kopiert den Text und schickt ihn selbst per E-Mail. Dies ist ein Endkundenprodukt: der Assistent baut keine Funktionen selbst, sondern bietet bei fehlenden Funktionen nur diesen Weg an.
 
-Alle document-Tools (`get_*`, `download_*_pdf`) akzeptieren UUID **oder** Belegnummer (z.B. `FB2600682`). PDFs landen in `~/Downloads/lexware/`.
+Alle document-Tools (`get_*`, `download_*_pdf`) akzeptieren UUID **oder** Belegnummer (z.B. `FB2600682`) — **Ausnahme Mahnungen**: die sind nur per id ansprechbar (s.o.). PDFs landen in `~/Downloads/lexware/`.
 
 Die `list_*`-Tools bieten dieselben Optionen wie die CLI:
 
