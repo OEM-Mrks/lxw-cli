@@ -53,6 +53,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from lxw_cli.config import DEFAULT_BASE_URL, config_dir
+from lxw_cli.mcp_allowlist import AllowList
 
 # Token lifetimes (seconds). Enforced via Fernet's built-in timestamp.
 # Tokens are stateless and cannot be individually revoked, so the refresh
@@ -256,6 +257,9 @@ class LexwareOAuthProvider(OAuthProvider):
             lexware_base_url
             or os.getenv("LEXWARE_API_BASE_URL", DEFAULT_BASE_URL)
         ).rstrip("/")
+        # KYC allow-list: only known Lexware installations may use the server.
+        # Inert (mode 'off') unless configured — see lxw_cli.mcp_allowlist.
+        self._allow = AllowList(directory, self._lexware_base_url)
         # Best-effort replay guard for auth codes (single process).
         self._used_codes: dict[str, float] = {}
         self._used_lock = threading.Lock()
@@ -382,6 +386,16 @@ class LexwareOAuthProvider(OAuthProvider):
             )
         if resp.status_code >= 400:
             return False, f"Unerwartete Antwort von Lexware (HTTP {resp.status_code})."
+        # Key is valid — now the KYC gate: is this Lexware installation known?
+        # Uses the profile we just fetched (no extra call) and warms the cache
+        # for the following per-request check. No-op when the gate is 'off'.
+        try:
+            profile = resp.json()
+        except ValueError:
+            profile = {}
+        decision = self._allow.evaluate_profile(profile, api_key)
+        if not decision.allowed:
+            return False, decision.user_message
         return True, ""
 
     # -- code → tokens ---------------------------------------------------------
@@ -477,6 +491,10 @@ class LexwareOAuthProvider(OAuthProvider):
     async def load_access_token(self, token: str) -> AccessToken | None:
         data = self._unseal("access", token, ACCESS_TOKEN_TTL)
         if data is not None:
+            # KYC gate (cached). Also re-checked here so an org removed from
+            # the allow-list is locked out even with a still-valid token.
+            if not (await self._allow.evaluate(data["key"])).allowed:
+                return None
             return AccessToken(
                 token=token,
                 client_id=data["client_id"],
@@ -489,6 +507,8 @@ class LexwareOAuthProvider(OAuthProvider):
         # let the Lexware API reject invalid keys with 401 on first use — the
         # server never needs to know valid keys up front.
         if _looks_like_api_key(token):
+            if not (await self._allow.evaluate(token)).allowed:
+                return None
             return AccessToken(
                 token=token,
                 client_id="direct-bearer",
