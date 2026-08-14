@@ -181,3 +181,59 @@ def test_non_2xx_raises(client: LexwareClient) -> None:
     with pytest.raises(LexwareAPIError) as excinfo:
         client.get("/v1/invoices/xxx")
     assert excinfo.value.status_code == 404
+    assert "not found" in str(excinfo.value)
+
+
+@respx.mock
+def test_length_validation_error_is_translated(client: LexwareClient) -> None:
+    respx.post("https://api.lexware.io/v1/invoices").mock(
+        return_value=httpx.Response(
+            406,
+            json={
+                "message": "Validation failed",
+                "details": [
+                    {"field": "title", "message": "size must be between 0 and 25"}
+                ],
+            },
+        )
+    )
+    with pytest.raises(LexwareAPIError) as excinfo:
+        client.post("/v1/invoices", {"title": "x"})
+    message = str(excinfo.value)
+    assert "Titel" in message
+    assert "25" in message
+    assert "zu lang" in message
+
+
+@respx.mock
+def test_line_item_field_gets_friendly_label(client: LexwareClient) -> None:
+    respx.post("https://api.lexware.io/v1/invoices").mock(
+        return_value=httpx.Response(
+            406,
+            json={
+                "details": [
+                    {
+                        "field": "lineItems[0].name",
+                        "message": "size must be between 0 and 100",
+                    }
+                ]
+            },
+        )
+    )
+    with pytest.raises(LexwareAPIError) as excinfo:
+        client.post("/v1/invoices", {})
+    assert "Positionsbezeichnung" in str(excinfo.value)
+    assert "100" in str(excinfo.value)
+
+
+@respx.mock
+def test_non_length_details_still_surface(client: LexwareClient) -> None:
+    respx.post("https://api.lexware.io/v1/invoices").mock(
+        return_value=httpx.Response(
+            400,
+            json={"details": [{"field": "voucherDate", "message": "must not be null"}]},
+        )
+    )
+    with pytest.raises(LexwareAPIError) as excinfo:
+        client.post("/v1/invoices", {})
+    assert "must not be null" in str(excinfo.value)

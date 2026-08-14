@@ -233,10 +233,71 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
 def _extract_message(response: httpx.Response) -> str:
     body = _safe_json(response)
     if isinstance(body, dict):
+        # Lexware reports field-level validation problems (e.g. an over-long
+        # text) in a `details` list. Surface those first — they are far more
+        # specific than the generic top-level message — and phrase length
+        # violations in plain German (the API only says "size must be …").
+        detail = _format_validation_details(body.get("details"))
+        if detail:
+            return detail
         for key in ("message", "error_description", "error", "title"):
             if key in body and body[key]:
                 return str(body[key])
     return response.text or response.reason_phrase or "API error"
+
+
+# Friendly German labels for the technical field paths Lexware returns in
+# `details[].field`. The list index (e.g. `lineItems[0].name`) is stripped
+# before the lookup. Missing entries fall back to the raw field name.
+_FRIENDLY_FIELDS = {
+    "title": "Titel",
+    "introduction": "Einleitungstext",
+    "remark": "Nachbemerkung",
+    "note": "Notiz",
+    "salutation": "Anrede",
+    "lineItems.name": "Positionsbezeichnung",
+    "lineItems.description": "Positionsbeschreibung",
+    "voucherItems.name": "Positionsbezeichnung",
+    "description": "Beschreibung",
+    "name": "Bezeichnung",
+}
+
+# "size must be between 0 and 25", "must not exceed 100", "maximum length 25" …
+_SIZE_HINT_RE = re.compile(
+    r"(?:between\s+\d+\s+and\s+(\d+))"
+    r"|(?:not\s+exceed\s+(\d+))"
+    r"|(?:max(?:imum)?\s+(?:length\s+)?(?:is\s+)?(\d+))",
+    re.IGNORECASE,
+)
+
+
+def _format_validation_details(details: object) -> str | None:
+    """Render Lexware's `details` list into one clear, human-friendly line."""
+    if not isinstance(details, list):
+        return None
+    parts: list[str] = []
+    for entry in details:
+        if not isinstance(entry, dict):
+            continue
+        raw_field = str(entry.get("field") or "").strip()
+        message = str(entry.get("message") or "").strip()
+        label = _FRIENDLY_FIELDS.get(re.sub(r"\[\d+\]", "", raw_field), raw_field)
+        size_match = _SIZE_HINT_RE.search(message)
+        if size_match:
+            limit = next(g for g in size_match.groups() if g)
+            if label:
+                parts.append(
+                    f"„{label}“ ist zu lang – höchstens {limit} Zeichen erlaubt."
+                )
+            else:
+                parts.append(f"Ein Text ist zu lang – höchstens {limit} Zeichen erlaubt.")
+        elif label and message:
+            parts.append(f"{label}: {message}")
+        elif message:
+            parts.append(message)
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 def _safe_json(response: httpx.Response) -> Any:

@@ -519,6 +519,11 @@ def create_invoice_draft(body: dict[str, Any]) -> dict[str, Any]:
     Line items support an optional `description` (long text shown under the
     position name on the PDF). When a line item is based on an article, copy
     the article's `description` into it.
+
+    Längenlimits (sonst lehnt Lexware ab): Belegtitel `title` max. 25 Zeichen;
+    Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
+    Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
+    max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
     """
     return services.create_invoice(_client_get(), body)
 
@@ -529,6 +534,7 @@ def create_contact(body: dict[str, Any]) -> dict[str, Any]:
 
     Minimal body example:
     {"roles": {"customer": {}}, "company": {"name": "Acme GmbH"}}
+    Längenlimits: Notiz `note` max. 1000 Zeichen; Anrede `salutation` max. 25.
     """
     return services.create_contact(_client_get(), body)
 
@@ -548,6 +554,7 @@ def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
       change billing addr: {"addresses": {"billing": [{"street": "Weg 1",
                             "zip": "50667", "city": "Köln", "countryCode": "DE"}]}}
     Note: `archived` is read-only in the Lexware API and cannot be changed here.
+    Längenlimits: Notiz `note` max. 1000 Zeichen; Anrede `salutation` max. 25.
     """
     return services.update_contact(_client_get(), contact_id, changes)
 
@@ -594,7 +601,12 @@ def download_voucher_file(file_id: str, output_dir: str | None = None) -> str | 
 
 @mcp.tool
 def create_article(body: dict[str, Any]) -> dict[str, Any]:
-    """Create a new article (product or service — master data, not a draft)."""
+    """Create a new article (product or service — master data, not a draft).
+
+    Längenlimits: Bezeichnung `title` max. 100 Zeichen; Beschreibung
+    `description` max. 2000 (einfache Formatierung wie **fett**, __kursiv__ und
+    `- Listen` ist möglich und zählt zu den 2000 Zeichen mit).
+    """
     return services.create_article(_client_get(), body)
 
 
@@ -607,6 +619,8 @@ def update_article(article_id: str, changes: dict[str, Any]) -> dict[str, Any]:
     Examples:
       change title: {"title": "Neuer Titel"}
       change price: {"price": {"netPrice": 19.99, "taxRate": 19}}
+    Längenlimits: Bezeichnung `title` max. 100 Zeichen; Beschreibung
+    `description` max. 2000 (einfache Formatierung möglich).
     """
     return services.update_article(_client_get(), article_id, changes)
 
@@ -641,6 +655,11 @@ def create_quotation_draft(body: dict[str, Any]) -> dict[str, Any]:
     Line items support an optional `description` (long text shown under the
     position name on the PDF). When a line item is based on an article, copy
     the article's `description` into it.
+
+    Längenlimits (sonst lehnt Lexware ab): Belegtitel `title` max. 25 Zeichen;
+    Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
+    Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
+    max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
     """
     return services.create_quotation(_client_get(), body)
 
@@ -652,6 +671,11 @@ def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
     Line items support an optional `description` (long text shown under the
     position name on the PDF). When a line item is based on an article, copy
     the article's `description` into it.
+
+    Längenlimits (sonst lehnt Lexware ab): Belegtitel `title` max. 25 Zeichen;
+    Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
+    Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
+    max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
     """
     return services.create_order_confirmation(_client_get(), body)
 
@@ -701,6 +725,11 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
     Line items support an optional `description` (long text shown under the
     position name on the PDF). When a line item is based on an article, copy
     the article's `description` into it.
+
+    Längenlimits (sonst lehnt Lexware ab): Belegtitel `title` max. 25 Zeichen;
+    Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
+    Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
+    max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
     """
     return services.create_delivery_note(_client_get(), body)
 

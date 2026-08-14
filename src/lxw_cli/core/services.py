@@ -21,6 +21,7 @@ from lxw_cli.core.constants import (
     INVOICE_LIKE_TYPES,
 )
 from lxw_cli.core.errors import LexwareAPIError, LexwareError
+from lxw_cli.core.limits import validate_article, validate_contact, validate_voucher
 from lxw_cli.core.models import ListResult
 
 if TYPE_CHECKING:
@@ -285,6 +286,7 @@ def download_invoice_pdf(client: LexwareClient, identifier: str) -> bytes:
 
 
 def create_invoice(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    validate_voucher(body)
     return client.post("/v1/invoices", body)
 
 
@@ -320,6 +322,7 @@ def get_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
 
 
 def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    validate_voucher(body)
     return client.post("/v1/vouchers", body)
 
 
@@ -437,6 +440,7 @@ def download_quotation_pdf(client: LexwareClient, identifier: str) -> bytes:
 
 
 def create_quotation(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    validate_voucher(body)
     return client.post("/v1/quotations", body)
 
 
@@ -476,6 +480,7 @@ def download_order_confirmation_pdf(client: LexwareClient, identifier: str) -> b
 def create_order_confirmation(
     client: LexwareClient, body: dict[str, Any]
 ) -> dict[str, Any]:
+    validate_voucher(body)
     return client.post("/v1/order-confirmations", body)
 
 
@@ -578,6 +583,7 @@ def download_delivery_note_pdf(client: LexwareClient, identifier: str) -> bytes:
 def create_delivery_note(
     client: LexwareClient, body: dict[str, Any]
 ) -> dict[str, Any]:
+    validate_voucher(body)
     return client.post("/v1/delivery-notes", body)
 
 
@@ -971,6 +977,7 @@ def get_contact(client: LexwareClient, contact_id: str) -> dict[str, Any]:
 
 
 def create_contact(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    validate_contact(body)
     return client.post("/v1/contacts", body)
 
 
@@ -988,6 +995,7 @@ def update_contact(
     current = client.get(f"/v1/contacts/{contact_id}")
     merged = _merge_for_update(current, changes)
     _guard_single_contact_person(merged)
+    validate_contact(merged)
     return _put_and_return_object(client, f"/v1/contacts/{contact_id}", merged)
 
 
@@ -1057,6 +1065,7 @@ def get_article(client: LexwareClient, article_id: str) -> dict[str, Any]:
 
 
 def create_article(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    validate_article(body)
     return client.post("/v1/articles", body)
 
 
@@ -1067,6 +1076,7 @@ def update_article(
     :func:`update_contact` (articles also use ``version`` locking)."""
     current = client.get(f"/v1/articles/{article_id}")
     merged = _merge_for_update(current, changes)
+    validate_article(merged)
     return _put_and_return_object(client, f"/v1/articles/{article_id}", merged)
 
 
