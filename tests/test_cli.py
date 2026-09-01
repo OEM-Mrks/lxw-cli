@@ -473,3 +473,91 @@ def test_contacts_create(runner: CliRunner) -> None:
     assert route.call_count == 1
     body = json.loads(route.calls.last.request.content)
     assert body["company"]["name"] == "Test"
+
+
+# ---------------------------------------------------------------------------
+# lxw status
+# ---------------------------------------------------------------------------
+
+_STATUS_URL = "https://status.lexware.de/api/v1/status"
+_NOTICES_URL = "https://status.lexware.de/api/v1/notices"
+
+
+def _mock_status(state: str, notices: list[dict] | None = None) -> None:
+    respx.get(_STATUS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "page": {
+                    "state": state,
+                    "state_text": "",
+                    "url": "https://status.lexware.de",
+                }
+            },
+        )
+    )
+    respx.get(_NOTICES_URL).mock(
+        return_value=httpx.Response(200, json={"notices": notices or []})
+    )
+
+
+def test_version_command_shows_build(runner: CliRunner) -> None:
+    from lxw_cli import __build__, __version__
+
+    result = runner.invoke(app, ["version"])
+
+    assert result.exit_code == 0
+    # Erste Zeile bleibt die nackte Versionsnummer (`lxw version | head -1`).
+    assert result.stdout.splitlines()[0] == __version__
+    assert __build__ in result.stdout
+
+
+@respx.mock
+def test_status_command_exits_zero_when_all_is_well(
+    runner: CliRunner, status_online: None
+) -> None:
+    _mock_status("operational")
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "normal" in result.stdout
+
+
+@respx.mock
+def test_status_command_exits_one_on_an_incident(
+    runner: CliRunner, status_online: None
+) -> None:
+    _mock_status(
+        "degraded",
+        [
+            {
+                "type": "unplanned",
+                "state": "investigating",
+                "subject": "Technische Störung im Bereich Belegerstellung",
+                "url": "https://status.lexware.de/notices/x",
+                "began_at": "2026-09-01T08:14:51.580Z",
+            }
+        ],
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "Belegerstellung" in result.stdout
+
+
+def test_status_command_exits_two_when_page_unreachable(runner: CliRunner) -> None:
+    """Nicht erreichbar ist ein dritter Zustand — nicht "alles gut", nicht "Störung"."""
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 2
+
+
+@respx.mock
+def test_status_command_json_output(runner: CliRunner, status_online: None) -> None:
+    _mock_status("operational")
+
+    result = runner.invoke(app, ["--json", "status"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["zustand"] == "operational"

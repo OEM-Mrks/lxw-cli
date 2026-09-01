@@ -6,7 +6,7 @@ from pathlib import Path
 
 import typer
 
-from lxw_cli import __version__
+from lxw_cli import __build__, __version__
 from lxw_cli.commands import (
     articles,
     contacts,
@@ -23,9 +23,10 @@ from lxw_cli.commands import (
 )
 from lxw_cli.config import load_config_interactive
 from lxw_cli.core import services
+from lxw_cli.core import status as status_api
 from lxw_cli.core.client import LexwareClient
 from lxw_cli.core.errors import LexwareAPIError, LexwareError
-from lxw_cli.output import OutputFormat, err_console, render, working
+from lxw_cli.output import OutputFormat, console, err_console, render, working
 
 app = typer.Typer(
     name="lxw",
@@ -79,7 +80,7 @@ class AppState:
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"lxw-cli {__version__}")
+        typer.echo(f"lxw-cli {__version__} (Build {__build__})")
         raise typer.Exit()
 
 
@@ -134,8 +135,79 @@ def profile_cmd(ctx: typer.Context) -> None:
 
 @app.command("version")
 def version_cmd() -> None:
-    """Version anzeigen."""
+    """Version und Build-Zeitpunkt anzeigen."""
+    # Die nackte Versionsnummer bleibt die erste Zeile, damit
+    # `lxw version | head -1` in Skripten weiter funktioniert.
     typer.echo(__version__)
+    typer.echo(f"Build {__build__}")
+
+
+@app.command("status")
+def status_cmd(
+    ctx: typer.Context,
+    planned: bool = typer.Option(
+        True,
+        "--planned/--no-planned",
+        help="Angekündigte Wartungen mit anzeigen.",
+    ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Zwischenspeicher übergehen und neu abfragen."
+    ),
+) -> None:
+    """Betriebsstatus von Lexware Office abfragen (status.lexware.de).
+
+    Braucht keinen API-Key und funktioniert auch dann, wenn Lexware selbst
+    nicht erreichbar ist. Exit-Code: 0 = alles normal, 1 = Störung oder
+    Wartung, 2 = Statusseite nicht erreichbar — so nutzbar im Monitoring.
+    """
+    state: AppState = ctx.obj
+    if refresh:
+        status_api.clear_cache()
+    with working("Frage Lexware-Status ab …"):
+        report = status_api.get_status(include_planned=planned)
+
+    if report is None:
+        if state.output_format is OutputFormat.TABLE:
+            err_console.print(
+                "[yellow]Die Lexware-Statusseite ist nicht erreichbar.[/yellow] "
+                "Daraus folgt nicht, dass eine Störung vorliegt."
+            )
+        else:
+            render(
+                {"zustand": "unbekannt", "statusseite": status_api.STATUS_BASE_URL},
+                state.output_format,
+                output_path=state.output_path,
+            )
+        raise typer.Exit(code=2)
+
+    if state.output_format is OutputFormat.TABLE:
+        color = "green" if report.operational else "red"
+        console.print(f"[{color}]{status_api.summary(report)}[/{color}]")
+    else:
+        render(
+            {
+                "zustand": report.state,
+                "zustand_text": report.state_text,
+                "zusammenfassung": status_api.summary(report),
+                "meldungen": [
+                    {
+                        "titel": n.subject,
+                        "art": n.type,
+                        "stand": n.state,
+                        "seit": n.began_at or n.begins_at,
+                        "link": n.url,
+                        "letztes_update": n.update,
+                    }
+                    for n in (*report.current, *report.planned)
+                ],
+                "statusseite": report.url,
+            },
+            state.output_format,
+            output_path=state.output_path,
+        )
+
+    if not report.operational:
+        raise typer.Exit(code=1)
 
 
 app.add_typer(
@@ -212,10 +284,27 @@ def _run() -> None:  # pragma: no cover
         err_console.print(f"[red]API-Fehler:[/red] {exc}")
         if isinstance(exc.body, dict) and exc.body:
             err_console.print(exc.body)
+        _print_status_hint(exc)
         raise SystemExit(1) from exc
     except LexwareError as exc:
         err_console.print(f"[red]Fehler:[/red] {exc}")
+        _print_status_hint(exc)
         raise SystemExit(1) from exc
+
+
+def _print_status_hint(exc: BaseException) -> None:  # pragma: no cover — I/O-Rand
+    """Bei Serverfehlern den Lexware-Betriebsstatus nachreichen.
+
+    Nur bei 5xx/Timeout/dauerhaftem 429 — unter einem Eingabefehler wäre der
+    Hinweis irreführend. Ein Fehler in der Diagnose selbst bleibt stumm: die
+    eigentliche Fehlermeldung steht bereits auf dem Schirm.
+    """
+    try:
+        hint = status_api.hint_for_exception(exc)
+    except Exception:  # noqa: BLE001
+        return
+    if hint:
+        err_console.print(f"[yellow]{hint}[/yellow]")
 
 
 if __name__ == "__main__":  # pragma: no cover

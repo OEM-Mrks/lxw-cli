@@ -299,3 +299,121 @@ async def test_get_dunning_tool_by_id() -> None:
     async with Client(mcp) as c:
         result = await c.call_tool("get_dunning", {"dunning_id": _UUID})
     assert result.data["id"] == _UUID
+
+
+# ---------------------------------------------------------------------------
+# Betriebsstatus: eigenes Tool + automatische Anreicherung von Serverfehlern
+# ---------------------------------------------------------------------------
+
+_STATUS_URL = "https://status.lexware.de/api/v1/status"
+_NOTICES_URL = "https://status.lexware.de/api/v1/notices"
+
+
+@pytest.fixture
+def status_page(status_online: None):
+    """Antworten der Statusseite für diesen Test vorgeben."""
+
+    def _mock(state: str, notices: list[dict] | None = None) -> None:
+        respx.get(_STATUS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"page": {"state": state, "state_text": "", "url": "https://status.lexware.de"}}
+            )
+        )
+        respx.get(_NOTICES_URL).mock(
+            return_value=httpx.Response(200, json={"notices": notices or []})
+        )
+
+    return _mock
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_service_status_tool_reports_normal(status_page) -> None:
+    status_page("operational")
+    async with Client(mcp) as c:
+        result = await c.call_tool("service_status", {})
+    assert result.data["zustand"] == "normal"
+    assert "normal" in result.data["zusammenfassung"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_service_status_tool_reports_incident(status_page) -> None:
+    status_page(
+        "degraded",
+        [
+            {
+                "type": "unplanned",
+                "state": "investigating",
+                "subject": "Technische Störung im Bereich Belegerstellung",
+                "url": "https://status.lexware.de/notices/x",
+                "began_at": "2026-09-01T08:14:51.580Z",
+                "latest_update": {"content": "Wir untersuchen."},
+            }
+        ],
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool("service_status", {})
+    assert result.data["zustand"] == "gestört"
+    meldung = result.data["aktuelle_meldungen"][0]
+    assert meldung["art"] == "Störung"
+    assert "Belegerstellung" in meldung["titel"]
+    assert meldung["letztes_update"] == "Wir untersuchen."
+
+
+@pytest.mark.asyncio
+async def test_service_status_tool_admits_when_it_cannot_tell() -> None:
+    """Nicht erreichbare Statusseite darf nie als Störung gemeldet werden."""
+    async with Client(mcp) as c:
+        result = await c.call_tool("service_status", {})
+    assert result.data["zustand"] == "unbekannt"
+    assert "Störung" not in result.data["zusammenfassung"].replace("Störungen", "")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_server_error_is_explained_by_the_status_page(status_page) -> None:
+    from fastmcp.exceptions import ToolError
+
+    status_page(
+        "degraded",
+        [
+            {
+                "type": "unplanned",
+                "state": "identified",
+                "subject": "Technische Störung im Bereich Belegerstellung",
+                "url": "https://status.lexware.de/notices/x",
+                "began_at": "2026-09-01T08:14:51.580Z",
+            }
+        ],
+    )
+    respx.get("https://api.lexware.io/v1/profile").mock(
+        return_value=httpx.Response(503, json={"message": "Service Unavailable"})
+    )
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("profile", {})
+
+    message = str(excinfo.value)
+    assert "503" in message
+    assert "Belegerstellung" in message
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_input_error_stays_unannotated(status_page) -> None:
+    """Unter einem Eingabefehler wäre ein Störungshinweis schlicht falsch."""
+    from fastmcp.exceptions import ToolError
+
+    status_page("degraded", [{"type": "unplanned", "state": "investigating",
+                              "subject": "Störung", "url": "https://status.lexware.de/x"}])
+    respx.get("https://api.lexware.io/v1/profile").mock(
+        return_value=httpx.Response(400, json={"message": "Titel zu lang"})
+    )
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("profile", {})
+
+    assert "status.lexware.de" not in str(excinfo.value)

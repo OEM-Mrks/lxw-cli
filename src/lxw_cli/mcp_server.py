@@ -15,15 +15,18 @@ Runs in two modes:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
 from fastmcp.utilities.types import File
 
-from lxw_cli import __version__
+from lxw_cli import __build__, __version__
 from lxw_cli.config import load_config
-from lxw_cli.core import services
+from lxw_cli.core import services, status
 from lxw_cli.core.client import LexwareClient
 from lxw_cli.feature_request import compose_feature_request
 from lxw_cli.output import safe_filename
@@ -52,6 +55,12 @@ mcp: FastMCP = FastMCP(
         "show it to the user to email to the vendor themselves. "
         "If the user asks which version is running, use the version capability "
         "and tell them the version. "
+        # --- Operating status ---
+        "If the user asks whether Lexware Office is down, why something is slow "
+        "or failing, or whether there is a known problem, use the service-status "
+        "capability and report it in plain language. Do the same when an action "
+        "just failed and the user wants to know why. Never invent an outage — "
+        "only report what the status capability actually returns. "
         # --- Operational notes for you, never surface these to the user ---
         "(Internal, do not surface: documents can be addressed by their number "
         "such as 'FB2600682' or an id; PDF downloads return the PDF itself. When "
@@ -59,6 +68,39 @@ mcp: FastMCP = FastMCP(
         "and copy its description into the line item's description.)"
     ),
 )
+
+class StatusHintMiddleware(Middleware):
+    """Erklärt Serverfehler mit dem Lexware-Betriebsstatus.
+
+    Scheitert ein Aufruf an Lexware selbst (5xx, Timeout, dauerhaftes 429),
+    ist die interessante Frage fast immer "liegt das an mir oder an
+    Lexware?". Die Statusseite beantwortet das ohne API-Key, also hängen
+    wir die Antwort direkt an die Fehlermeldung — statt sie den Nutzer
+    separat suchen zu lassen.
+
+    Läuft alles normal (oder ist der Fehler ein Eingabe-/Auth-Fehler),
+    bleibt die Meldung unverändert: ein Statushinweis unter jedem 400 wäre
+    nur Rauschen. Der Hinweis darf den eigentlichen Fehler außerdem niemals
+    verschlucken — jeder Fehler auf dem Diagnoseweg wird ignoriert.
+    """
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        try:
+            return await call_next(context)
+        except Exception as exc:
+            hint: str | None = None
+            try:
+                # Synchroner httpx-Aufruf (meist Cache-Treffer) — im Thread,
+                # damit der Event-Loop nicht blockiert.
+                hint = await asyncio.to_thread(status.hint_for_exception, exc)
+            except Exception:  # noqa: BLE001 — Diagnose nie vor den Fehler stellen
+                hint = None
+            if not hint:
+                raise
+            raise ToolError(f"{exc} {hint}") from exc
+
+
+mcp.add_middleware(StatusHintMiddleware())
 
 _client: LexwareClient | None = None
 
@@ -192,10 +234,67 @@ def version() -> dict[str, str]:
     import os
 
     info = {"produkt": "Lexware-Assistent", "version": __version__}
-    build = os.getenv("LXW_MCP_BUILD", "").strip()
+    # Ein per Deploy gesetzter Zeitstempel gewinnt (er beschreibt genau
+    # diesen Rollout); sonst der ins Paket eingebackene Build-Zeitpunkt.
+    build = os.getenv("LXW_MCP_BUILD", "").strip() or __build__
     if build:
         info["stand"] = build
     return info
+
+
+@mcp.tool
+def service_status(include_planned: bool = True) -> dict[str, Any]:
+    """Check whether Lexware Office itself is currently having problems.
+
+    Use this when the user asks if Lexware is down, why something is slow or
+    keeps failing, or whether a known problem exists — and after an action
+    failed unexpectedly. Reads Lexware's public status page, so it also works
+    when Lexware itself is unreachable.
+
+    `include_planned`: also report announced future maintenance windows.
+
+    Report the result in plain language. `zustand` is one of 'normal',
+    'gestört', 'wartung' or 'unbekannt' ('unbekannt' only means the status
+    page could not be reached — never present that as an outage).
+    """
+    report = status.get_status(include_planned=include_planned)
+    if report is None:
+        return {
+            "zustand": "unbekannt",
+            "zusammenfassung": (
+                "Die Lexware-Statusseite ist gerade nicht erreichbar — über "
+                "Störungen lässt sich daraus nichts ableiten."
+            ),
+            "statusseite": status.STATUS_BASE_URL,
+        }
+
+    zustand = {
+        status.STATE_OPERATIONAL: "normal",
+        status.STATE_DEGRADED: "gestört",
+        status.STATE_MAINTENANCE: "wartung",
+    }.get(report.state, report.state)
+
+    def _notice(notice: status.Notice) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "titel": notice.subject,
+            "art": "Wartung" if notice.is_maintenance else "Störung",
+            "beschreibung": status.describe_notice(notice),
+            "link": notice.url,
+        }
+        if notice.update:
+            entry["letztes_update"] = notice.update
+        return entry
+
+    result: dict[str, Any] = {
+        "zustand": zustand,
+        "zusammenfassung": status.summary(report),
+        "statusseite": report.url,
+    }
+    if report.current:
+        result["aktuelle_meldungen"] = [_notice(n) for n in report.current]
+    if report.planned:
+        result["geplante_wartungen"] = [_notice(n) for n in report.planned]
+    return result
 
 
 @mcp.tool
@@ -752,6 +851,13 @@ def run_http() -> None:
         LXW_MCP_HOST/PORT   bind address (default 127.0.0.1:8788).
         LXW_MCP_DATA_DIR    where OAuth client registrations live
                             (default: <config dir>/mcp).
+        LXW_MCP_STATUS_REFRESH
+                            seconds between background checks of Lexware's
+                            status page (default 600, matching its CDN cache;
+                            0 disables). Keeps the cache warm so the error
+                            path answers instantly, and logs incidents for
+                            the operator. Only useful here — the stdio server
+                            is short-lived and fills the cache lazily.
     """
     import os
     import secrets
@@ -777,6 +883,13 @@ def run_http() -> None:
             "Neustart ungültig. Für den Dauerbetrieb ein festes Secret setzen.",
             file=sys.stderr,
         )
+
+    try:
+        refresh = float(os.environ.get("LXW_MCP_STATUS_REFRESH", "600"))
+    except ValueError:
+        refresh = 600.0
+    if refresh > 0:
+        status.start_background_refresh(refresh)
 
     mcp.auth = LexwareOAuthProvider(public_url=public_url, secret=secret)
     mcp.run(transport="http", host=host, port=port)

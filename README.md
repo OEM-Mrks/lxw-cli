@@ -22,6 +22,7 @@ Ein Kommandozeilen-Tool für die [Lexware Office API](https://developers.lexware
 - PDF-Download nach Datei **oder** Verzeichnis (Auto-Dateiname); `-o` optional
 - Komfort: API-Key-Abfrage beim ersten Start, Warte-Animation bei längeren Abrufen
 - Eingebauter Rate-Limit-Schutz (2 req/s) + automatische Retries auf 429/5xx
+- Betriebsstatus: `lxw status` fragt status.lexware.de ab; bei Serverfehlern wird der Grund **automatisch** an die Fehlermeldung gehängt
 
 ## Installation
 
@@ -178,6 +179,7 @@ lxw invoices create-draft --body @invoice-template.json
 | Befehl | Zweck |
 |---|---|
 | `lxw profile` | Firmenprofil abrufen (Auth-Test) |
+| `lxw status` | Betriebsstatus von Lexware Office (nicht zu verwechseln mit `lxw mcp status`) |
 | `lxw invoices` | Rechnungen: `list`, `get`, `payment`, `pdf`, `create-draft` |
 | `lxw contacts` | Kontakte: `list`, `get`, `create` |
 | `lxw vouchers` | Belege: `list`, `get`, `create-draft`, `upload-file`, `download-file` |
@@ -193,6 +195,41 @@ Hinweis: `create-draft` legt **Belege** als Entwurf an (Draft, nicht finalisiert
 `create` direkt angelegt.
 
 Detail-Hilfe mit `lxw <command> --help` bzw. `lxw <command> list --help`.
+
+## Betriebsstatus
+
+`lxw status` liest die öffentliche Statusseite **status.lexware.de** — ohne
+API-Key, und damit auch dann, wenn Lexware selbst nicht antwortet oder der
+Schlüssel abgelaufen ist.
+
+```bash
+lxw status                  # Zustand + laufende Störungen + angekündigte Wartungen
+lxw status --no-planned     # nur der aktuelle Zustand
+lxw status --refresh        # Zwischenspeicher übergehen
+lxw --json status           # maschinenlesbar
+```
+
+Exit-Codes für Monitoring: `0` alles normal · `1` Störung oder Wartung ·
+`2` Statusseite nicht erreichbar (**nicht** dasselbe wie eine Störung).
+
+Zusätzlich passiert das automatisch: schlägt ein Aufruf mit einem Serverfehler
+fehl (5xx, Timeout, dauerhaftes 429), hängt die CLI — und im MCP-Server jedes
+Tool — den Grund direkt an die Fehlermeldung:
+
+```
+API-Fehler: HTTP 503: Service Unavailable
+Lexware meldet derzeit eine Störung: Technische Störung im Bereich
+Belegerstellung (seit 10:14 Uhr, Ursache gefunden, Behebung läuft) — das ist
+vermutlich die Ursache. Details: https://status.lexware.de
+```
+
+Bei Eingabe- oder Auth-Fehlern (400/401/404) bleibt die Meldung unverändert —
+ein Störungshinweis wäre dort irreführend. Läuft die Statusseite grün, wird
+ebenfalls nichts angehängt.
+
+Das Ergebnis wird 5 Minuten zwischengespeichert (auf dem Fehlerpfad 1 Minute).
+Die Statusseite liegt selbst hinter einem CDN mit 10-Minuten-Cache — häufiger
+abzufragen liefert dieselbe Antwort.
 
 ## Suchen, Filtern & Paginierung
 
@@ -377,9 +414,10 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 
 ### Verfügbare MCP-Tools
 
-38 Tools mit identischem Verhalten wie die CLI-Befehle:
+39 Tools mit identischem Verhalten wie die CLI-Befehle:
 
 - **Info**: `version` (meldet die laufende Version + Build-Zeitstempel — nützlich, wenn eine Client-UI wie ChatGPT eine gecachte/alte Version anzeigt)
+- **Betriebsstatus**: `service_status` beantwortet „ist Lexware gerade gestört?" bzw. „warum geht das nicht?" aus der öffentlichen Statusseite — ohne API-Key und damit auch dann, wenn Lexware selbst nicht antwortet. Zusätzlich hängt der Server den Grund bei Serverfehlern **automatisch** an jede Tool-Fehlermeldung (siehe [Betriebsstatus](#betriebsstatus)).
 - **Belegkette (weiterführen)**: `continue_document` führt einen Beleg in den Folgebeleg fort und hält beide verknüpft (`precedingSalesVoucherId`). Der Quelltyp wird automatisch erkannt (Belegnummer oder id). Unterstützte Wege (wie in Lexware):
   - **Angebot** → Auftrag · Lieferschein · Rechnung
   - **Auftrag** → Lieferschein · Rechnung
@@ -456,6 +494,11 @@ Hinweise für den Betrieb:
   sichtbare Basis-URL (sie steht in den OAuth-Metadaten).
 - PDF-Downloads liefern über HTTP das PDF als Binärinhalt zurück (statt eines
   Pfads auf der Server-Platte wie im stdio-Modus).
+- Der Server prüft im Hintergrund alle 10 Minuten den Lexware-Betriebsstatus
+  (`LXW_MCP_STATUS_REFRESH`, Sekunden; `0` schaltet das ab). Das hält den
+  Zwischenspeicher warm, damit der Fehlerpfad sofort antwortet, und schreibt
+  Störungen ins Server-Log. Nur hier sinnvoll — der stdio-Server ist zu
+  kurzlebig und füllt den Zwischenspeicher bei Bedarf.
 - Tokens laufen nach 24 h ab; Clients erneuern sie automatisch per
   Refresh-Token. Ein geleaktes Token wird wirkungslos, sobald der zugehörige
   Lexware-Key unter <https://app.lexware.de/addons/public-api> widerrufen wird.

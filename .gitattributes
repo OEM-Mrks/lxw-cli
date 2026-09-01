@@ -1,2 +1,7 @@
+# Syncthing/Windows schreibt CRLF in den Working Tree zurück. text=auto
+# vergleicht und committet normalisiert (kein Diff-Rauschen mehr), eol=lf
+# erzwingt LF beim Checkout.
+* text=auto eol=lf
+
 # Snapshots werden byte-genau verglichen — niemals EOL-konvertieren.
 tests/snapshots/** -text
