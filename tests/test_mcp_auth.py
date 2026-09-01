@@ -103,18 +103,21 @@ def server(tmp_path_factory: pytest.TempPathFactory):
     """The lexware MCP server with auth, on a real local port."""
     from lxw_cli.mcp_server import mcp
 
-    provider = LexwareOAuthProvider(
-        public_url="http://127.0.0.1:0",  # patched below once the port is known
-        secret="e2e-secret",
-        data_dir=tmp_path_factory.mktemp("mcp-auth"),
-    )
+    # Port zuerst festlegen, dann den Provider damit bauen. Ein nachträglich
+    # gesetztes `base_url` reicht seit fastmcp 4.0 nicht mehr — die
+    # OAuth-Metadaten (issuer) werden daraus nicht mehr abgeleitet. Der
+    # Produktivpfad kennt die URL ohnehin schon im Konstruktor (run_http),
+    # also bildet der Test das jetzt genauso ab.
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
-    from pydantic import AnyHttpUrl
 
-    provider.base_url = AnyHttpUrl(base)  # what /authorize redirects are built from
+    provider = LexwareOAuthProvider(
+        public_url=base,
+        secret="e2e-secret",
+        data_dir=tmp_path_factory.mktemp("mcp-auth"),
+    )
     mcp.auth = provider
 
     config = uvicorn.Config(mcp.http_app(), host="127.0.0.1", port=port, log_level="error")

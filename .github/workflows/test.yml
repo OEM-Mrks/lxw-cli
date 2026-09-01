@@ -24,13 +24,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        # --clear: setup-uv legt je nach Plattform bereits ein .venv an
-        run: |
-          uv venv --clear
-          uv pip install -e ".[dev]"
+        # Aus uv.lock, nicht frei aufgelöst: sonst testet CI andere
+        # Abhängigkeitsversionen als die, die ausgeliefert werden — genau so
+        # rutschte unbemerkt fastmcp 4.0 in den Testlauf, während das Lockfile
+        # auf 3.4.4 stand. --locked bricht ab, wenn uv.lock nicht zu
+        # pyproject.toml passt (statt es stillschweigend zu aktualisieren).
+        run: uv sync --extra dev --locked --python ${{ matrix.python-version }}
 
+      # --extra dev bei jedem Aufruf, sonst re-synct `uv run` die Umgebung auf
+      # die Standard-Extras und wirft ruff/pytest wieder heraus.
       - name: Ruff
-        run: uv run --no-project ruff check src tests
+        run: uv run --extra dev --locked ruff check src tests
 
       - name: Pytest
-        run: uv run --no-project pytest -v
+        run: uv run --extra dev --locked pytest -v
