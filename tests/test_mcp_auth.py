@@ -359,3 +359,116 @@ async def test_consent_with_expired_txn(server: str) -> None:
         page = await c.get("/consent", params={"txn": "garbage"})
         assert page.status_code == 400
         assert "abgelaufen oder ungültig" in page.text
+
+
+async def _oauth_access_token(c: httpx.AsyncClient, server: str, *, resource: str, key: str):
+    """Run DCR → authorize → consent → token; return (consent html, access token)."""
+    reg = await c.post(
+        "/register",
+        json={
+            "client_name": "multi client",
+            "redirect_uris": ["http://127.0.0.1:9/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        },
+    )
+    client = reg.json()
+    verifier, challenge = _pkce()
+    auth = await c.get(
+        "/authorize",
+        params={
+            "client_id": client["client_id"],
+            "response_type": "code",
+            "redirect_uri": "http://127.0.0.1:9/callback",
+            "state": "s",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "mcp",
+            "resource": resource,
+        },
+    )
+    consent_url = auth.headers["location"]
+    page = (await c.get(consent_url)).text
+    txn = parse_qs(urlparse(consent_url).query)["txn"][0]
+    with respx.mock:
+        respx.route(host="127.0.0.1").pass_through()
+        respx.get(f"{LEXWARE_API}/v1/profile").mock(
+            return_value=httpx.Response(200, json={"companyName": "X"})
+        )
+        submit = await c.post("/consent", data={"txn": txn, "api_key": key})
+    code = parse_qs(urlparse(submit.headers["location"]).query)["code"][0]
+    tok = await c.post(
+        "/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "http://127.0.0.1:9/callback",
+            "client_id": client["client_id"],
+            "code_verifier": verifier,
+        },
+    )
+    tokens = tok.json()
+    # Das Label muss auch einen Refresh überleben.
+    refreshed = await c.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": client["client_id"],
+        },
+    )
+    return page, refreshed.json()["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_two_installations_as_separate_connectors(server: str) -> None:
+    """oemedia + demo: zwei Verbindungen, je eigener Key, sauber getrennt."""
+    from fastmcp import Client
+
+    async with httpx.AsyncClient(base_url=server, follow_redirects=False) as c:
+        page_demo, token_demo = await _oauth_access_token(
+            c, server, resource=f"{server}/mcp?installation=demo", key="demo-key-1234567890"
+        )
+        _, token_oem = await _oauth_access_token(
+            c, server, resource=f"{server}/mcp?installation=oemedia", key="oem-key-1234567890"
+        )
+    # Die Consent-Seite sagt, für welche Installation der Key gedacht ist.
+    assert "<strong>demo</strong>" in page_demo
+
+    with respx.mock:
+        respx.route(host="127.0.0.1").pass_through()
+        route = respx.get(f"{LEXWARE_API}/v1/profile").mock(
+            return_value=httpx.Response(200, json={"companyName": "X"})
+        )
+        for label, token, key in (
+            ("demo", token_demo, "demo-key-1234567890"),
+            ("oemedia", token_oem, "oem-key-1234567890"),
+        ):
+            async with Client(f"{server}/mcp?installation={label}", auth=token) as mc:
+                version = await mc.call_tool("version", {})
+                await mc.call_tool("profile", {})
+            assert version.data["installation"] == label
+            assert route.calls.last.request.headers["authorization"] == f"Bearer {key}"
+
+
+@pytest.mark.asyncio
+async def test_direct_bearer_installation_label_from_url(server: str) -> None:
+    from fastmcp import Client
+
+    async with Client(f"{server}/mcp?installation=demo", auth="raw-key-abcdef-123456") as mc:
+        version = await mc.call_tool("version", {})
+    assert version.data["installation"] == "demo"
+    async with Client(f"{server}/mcp", auth="raw-key-abcdef-123456") as mc:
+        version = await mc.call_tool("version", {})
+    assert "installation" not in version.data
+
+
+def test_installation_from_url() -> None:
+    from lxw_cli.mcp_auth import installation_from_url
+
+    assert installation_from_url("https://x/mcp?installation=Demo") == "demo"
+    assert installation_from_url("https://x/mcp?profile=oemedia") == "oemedia"
+    assert installation_from_url("https://x/mcp?installation=../bad") is None
+    assert installation_from_url("https://x/mcp") is None
+    assert installation_from_url(None) is None

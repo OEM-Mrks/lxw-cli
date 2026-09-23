@@ -373,16 +373,19 @@ def _summary(entity: Entity, result: Any) -> str:
     return base + note
 
 
-def run() -> None:
+def run(profile: str | None = None) -> None:
     """Entry point for `lxw-tui` and the no-args `lxw` auto-launch."""
     try:
-        config = load_config_interactive()
+        config = load_config_interactive(profile)
     except LexwareError as exc:
         print(f"Fehler: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
     client = LexwareClient(config)
+    app = LexwareTUI(client)
+    if config.profile:
+        app.sub_title = f"Profil: {config.profile}"
     try:
-        LexwareTUI(client).run()
+        app.run()
     finally:
         client.close()
 

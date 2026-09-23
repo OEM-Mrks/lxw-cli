@@ -22,6 +22,7 @@ Ein Kommandozeilen-Tool für die [Lexware Office API](https://developers.lexware
 - PDF-Download nach Datei **oder** Verzeichnis (Auto-Dateiname); `-o` optional
 - Komfort: API-Key-Abfrage beim ersten Start, Warte-Animation bei längeren Abrufen
 - Eingebauter Rate-Limit-Schutz (2 req/s) + automatische Retries auf 429/5xx
+- Mehrere Lexware-Installationen (z.B. Firma + Demo) über **Profile** — in CLI, TUI und MCP-Server (`lxw profiles`, `--profile`)
 - Betriebsstatus: `lxw status` fragt status.lexware.de ab; bei Serverfehlern wird der Grund **automatisch** an die Fehlermeldung gehängt
 
 ## Installation
@@ -127,6 +128,38 @@ cp .env.example .env   # projektlokal
 In nicht-interaktiven Kontexten (Pipes, Cron, MCP-Server über stdio) wird **nicht**
 gefragt — dort muss der Key vorab über eine der drei Quellen vorhanden sein.
 
+### Mehrere Lexware-Installationen (Profile)
+
+Wer mehrere Lexware-Installationen nutzt — etwa die eigene Firma und eine
+Demo-Instanz —, legt pro Installation ein **Profil** mit eigenem API-Key an:
+
+```bash
+lxw profiles add oemedia      # fragt den Key ab, prüft ihn, zeigt den Firmennamen
+lxw profiles add demo
+lxw profiles list --check     # alle Profile + Firmenname je Key
+lxw profiles remove demo
+```
+
+Jedes Profil liegt als eigene Datei unter `~/.config/lexware/profiles/<name>.env`
+(chmod 600; Windows: `%APPDATA%\lexware\profiles\`). Nicht-interaktiv geht
+auch `echo "$KEY" | lxw profiles add demo`.
+
+Auswahl per `--profile`/`-p` (vor dem Befehl) oder `LEXWARE_PROFILE`:
+
+```bash
+lxw -p demo invoices list
+LEXWARE_PROFILE=oemedia lxw contacts list
+lxw -p demo                   # TUI für die Demo-Installation
+```
+
+- Ohne Profil bleibt alles wie bisher (Key-Suche wie oben) — der bisherige
+  globale Key ist das Profil `default`.
+- Ein benanntes Profil liest den Key **ausschließlich** aus seiner Datei. Ein
+  exportiertes `LEXWARE_API_KEY` oder eine projektlokale `.env` kann es also
+  nicht auf eine andere Installation umlenken; fehlt der Key, gibt es einen
+  Fehler statt eines stillen Fallbacks.
+- Optional kann ein Profil eine eigene `LEXWARE_API_BASE_URL` enthalten.
+
 ## Quickstart
 
 ```bash
@@ -189,6 +222,7 @@ lxw invoices create-draft --body @invoice-template.json
 | `lxw orders` | Aufträge (Auftragsbestätigungen): `list`, `get`, `pdf`, `create-draft` |
 | `lxw delivery-notes` | Lieferscheine: `list`, `get`, `pdf`, `create-draft` |
 | `lxw dunnings` | Mahnungen: `create` (aus Rechnung), `get`, `pdf` (nur per id) |
+| `lxw profiles` | Mehrere Lexware-Installationen: `add`, `list`, `remove` |
 
 Hinweis: `create-draft` legt **Belege** als Entwurf an (Draft, nicht finalisiert);
 **Stammdaten** (Kontakte, Artikel) kennen keinen Draft-Status und werden mit
@@ -330,6 +364,7 @@ langsamer als die exakten Server-Filter.
 | `--json` | JSON-Ausgabe (für Pipelines) |
 | `--csv` | CSV-Ausgabe |
 | `--output PATH`, `-o` | In Datei statt stdout schreiben |
+| `--profile NAME`, `-p` | Lexware-Installation (Profil) wählen; auch per `LEXWARE_PROFILE` |
 | `--version`, `-V` | Version anzeigen |
 
 ## Interaktive TUI
@@ -442,6 +477,32 @@ Die `list_*`-Tools bieten dieselben Optionen wie die CLI:
 - `list_contacts` filtert mit `customer` / `vendor` nach Rolle.
 - Belege-Tools (`list_invoices`, `list_vouchers`, `list_quotations`, `list_delivery_notes`) und `list_contacts` blenden archivierte standardmäßig aus; `include_archived=true` zeigt sie.
 
+### Mehrere Lexware-Installationen in Claude
+
+Pro Profil wird ein **eigener MCP-Server** registriert (`lexware-<profil>`),
+fest an dieses Profil gebunden. Claude sieht damit getrennte Werkzeuge je
+Installation und kann Daten nicht versehentlich vermischen:
+
+```bash
+lxw profiles add oemedia
+lxw profiles add demo
+
+lxw mcp install-claude  --profile oemedia   # → Server 'lexware-oemedia'
+lxw mcp install-claude  --profile demo      # → Server 'lexware-demo'
+lxw mcp install-desktop --profile oemedia   # Claude Desktop/Cowork analog
+lxw mcp install-desktop --profile demo
+lxw mcp status                              # listet alle lexware-* Server
+```
+
+- Der Server startet als `lxw-mcp --profile <name>` — das Profil steht sichtbar
+  in der Claude-Konfiguration, der **Key nicht** (der bleibt in der Profildatei).
+- Fehlt das Profil, bricht der Server beim Start mit klarer Meldung ab, statt
+  auf eine andere Installation auszuweichen.
+- Der Server nennt Claude seine Installation (Server-Hinweise und
+  `version` → `installation`), damit Antworten zuordenbar bleiben.
+- Der klassische Server `lexware` (ohne Profil) kann parallel bestehen bleiben.
+- `uninstall-claude`/`uninstall-desktop` nehmen ebenfalls `--profile`.
+
 ### Weitere mcp-Befehle
 
 ```bash
@@ -502,6 +563,29 @@ Hinweise für den Betrieb:
 - Tokens laufen nach 24 h ab; Clients erneuern sie automatisch per
   Refresh-Token. Ein geleaktes Token wird wirkungslos, sobald der zugehörige
   Lexware-Key unter <https://app.lexware.de/addons/public-api> widerrufen wird.
+
+**Mehrere Installationen über HTTP** (z.B. oemedia + Demo): pro Installation
+eine eigene Verbindung mit eigenem Key. Damit die Verbindungen unterscheidbar
+sind (und Clients wie claude.ai dieselbe Adresse nicht doppelt ablehnen),
+hängt man `?installation=<name>` an die URL:
+
+```bash
+# Header-fähige Clients
+claude mcp add lexware-oemedia --transport http "https://mcp.example.com/mcp?installation=oemedia" \
+  --header "Authorization: Bearer ${KEY_OEMEDIA}"
+claude mcp add lexware-demo --transport http "https://mcp.example.com/mcp?installation=demo" \
+  --header "Authorization: Bearer ${KEY_DEMO}"
+
+# claude.ai / ChatGPT: zwei Connectoren
+#   https://mcp.example.com/mcp?installation=oemedia
+#   https://mcp.example.com/mcp?installation=demo
+```
+
+Der Parameter ist nur eine **Beschriftung** — welche Installation angesprochen
+wird, entscheidet allein der Key. Die OAuth-Consent-Seite zeigt den Namen an
+("gib den API-Key genau dieser Installation ein"), das Label wird ins Token
+übernommen (übersteht auch den Refresh), und `version` meldet es als
+`installation`. Der Server speichert weiterhin keine Keys.
 
 `request_feature` braucht keine Konfiguration: es liefert nur einen fertigen
 Text + die Empfänger-Adresse (`david@oemedia.de`) zurück, den der Nutzer selbst

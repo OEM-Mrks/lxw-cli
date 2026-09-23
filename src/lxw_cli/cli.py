@@ -21,7 +21,10 @@ from lxw_cli.commands import (
 from lxw_cli.commands import (
     mcp as mcp_cmd,
 )
-from lxw_cli.config import load_config_interactive
+from lxw_cli.commands import (
+    profiles as profiles_cmd,
+)
+from lxw_cli.config import ENV_PROFILE, load_config_interactive, validate_profile_name
 from lxw_cli.core import services
 from lxw_cli.core import status as status_api
 from lxw_cli.core.client import LexwareClient
@@ -52,6 +55,8 @@ Artikel suchen: [green]lxw articles list --search schraube[/green]
 Kunden als CSV: [green]lxw --csv -o kunden.csv contacts list --customer --all[/green]
 
 Claude-Integration einrichten: [green]lxw mcp install-claude[/green]
+
+Zweite Installation: [green]lxw profiles add demo[/green] → [green]lxw -p demo invoices list[/green]
 """,
 )
 
@@ -60,13 +65,14 @@ Claude-Integration einrichten: [green]lxw mcp install-claude[/green]
 class AppState:
     output_format: OutputFormat
     output_path: Path | None
+    profile: str | None = None
     _client: LexwareClient | None = None
 
     @property
     def client(self) -> LexwareClient:
         if self._client is None:
             try:
-                config = load_config_interactive()
+                config = load_config_interactive(self.profile)
             except LexwareError as exc:
                 err_console.print(f"[red]Fehler:[/red] {exc}")
                 raise typer.Exit(code=2) from exc
@@ -100,6 +106,16 @@ def main(
         help="In Datei schreiben statt auf stdout.",
         rich_help_panel="Output",
     ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        envvar=ENV_PROFILE,
+        help=(
+            "Lexware-Installation (Profil) wählen, z.B. 'demo'. "
+            "Ohne Angabe: der klassische Standard-Key."
+        ),
+    ),
     _version: bool = typer.Option(
         False,
         "--version",
@@ -119,7 +135,13 @@ def main(
         else OutputFormat.TABLE
     )
 
-    state = AppState(output_format=fmt, output_path=output)
+    if profile:
+        try:
+            profile = validate_profile_name(profile)
+        except LexwareError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--profile") from exc
+
+    state = AppState(output_format=fmt, output_path=output, profile=profile or None)
     ctx.obj = state
     ctx.call_on_close(state.close)
 
@@ -257,17 +279,39 @@ app.add_typer(
     help="Mahnungen: create (aus Rechnung), get/pdf (nur per id — kein Listing).",
 )
 app.add_typer(mcp_cmd.app, name="mcp", help="MCP-Server-Integration für Claude.")
+app.add_typer(
+    profiles_cmd.app,
+    name="profiles",
+    help="Mehrere Lexware-Installationen: add/list/remove (Auswahl mit --profile).",
+)
+
+
+def _tui_profile_arg(argv: list[str]) -> tuple[bool, str | None]:
+    """Split `lxw [--profile NAME]` into (only-profile-args, profile).
+
+    Returns (False, None) as soon as anything besides the profile option is
+    present — then it's a regular CLI invocation.
+    """
+    rest = argv[1:]
+    if not rest:
+        return True, None
+    if len(rest) == 1 and rest[0].startswith("--profile="):
+        return True, rest[0].split("=", 1)[1]
+    if len(rest) == 2 and rest[0] in ("--profile", "-p"):
+        return True, rest[1]
+    return False, None
 
 
 def _wants_tui(argv: list[str], *, stdin_tty: bool, stdout_tty: bool) -> bool:
     """Decide whether the bare `lxw` invocation should open the TUI.
 
-    Only when there are no subcommands/arguments AND we're on a real interactive
-    terminal (both stdin and stdout). With arguments it's the CLI; when stdout
-    isn't a TTY (piping, scripting) it stays the CLI (Typer prints help) — never
-    the TUI, never an error.
+    Only when there are no subcommands/arguments (a lone `--profile NAME` is
+    allowed) AND we're on a real interactive terminal (both stdin and stdout).
+    With arguments it's the CLI; when stdout isn't a TTY (piping, scripting)
+    it stays the CLI (Typer prints help) — never the TUI, never an error.
     """
-    return len(argv) <= 1 and stdin_tty and stdout_tty
+    only_profile, _ = _tui_profile_arg(argv)
+    return only_profile and stdin_tty and stdout_tty
 
 
 def _run() -> None:  # pragma: no cover
@@ -276,7 +320,12 @@ def _run() -> None:  # pragma: no cover
     ):
         from lxw_cli.tui.app import run as run_tui
 
-        run_tui()
+        _, profile = _tui_profile_arg(sys.argv)
+        try:
+            run_tui(validate_profile_name(profile) if profile else None)
+        except LexwareError as exc:
+            err_console.print(f"[red]Fehler:[/red] {exc}")
+            raise SystemExit(2) from exc
         return
     try:
         app()

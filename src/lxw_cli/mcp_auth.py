@@ -33,7 +33,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -72,6 +72,13 @@ ENV_PORT = "LXW_MCP_PORT"
 ENV_DATA_DIR = "LXW_MCP_DATA_DIR"
 
 CLAIM_KEY = "lexware_api_key"
+CLAIM_INSTALLATION = "lexware_installation"
+
+# Query parameter on the connector URL that names the Lexware installation,
+# e.g. https://mcp.example.com/mcp?installation=demo. It only labels the
+# connection (and makes the URL distinct, so a client can hold one connector
+# per installation) — which installation is used is decided solely by the key.
+INSTALLATION_PARAMS = ("installation", "profile")
 
 # Single coarse scope. claude.ai's OAuth expects a granted scope to be
 # advertised (scopes_supported) and echoed in the token response; a server
@@ -160,6 +167,47 @@ class ClientPool:
 pool = ClientPool()
 
 
+def installation_from_url(url: str | None) -> str | None:
+    """Extract a valid installation label from a connector/resource URL."""
+    if not url:
+        return None
+    from lxw_cli.config import validate_profile_name
+    from lxw_cli.core.errors import ConfigError
+
+    query = parse_qs(urlsplit(url).query)
+    for param in INSTALLATION_PARAMS:
+        for value in query.get(param, []):
+            try:
+                return validate_profile_name(value)
+            except ConfigError:
+                continue
+    return None
+
+
+def request_installation() -> str | None:
+    """Installation label of the current HTTP request, if any.
+
+    From the OAuth token (label captured at connect time) or, for direct
+    Bearer clients, from the request URL's `?installation=` parameter.
+    """
+    try:
+        from fastmcp.server.dependencies import get_access_token
+
+        token = get_access_token()
+    except Exception:  # noqa: BLE001 — no request context (stdio)
+        return None
+    claims = (getattr(token, "claims", None) or {}) if token is not None else {}
+    label = claims.get(CLAIM_INSTALLATION)
+    if isinstance(label, str) and label:
+        return label
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        return installation_from_url(str(get_http_request().url))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def request_api_key() -> str | None:
     """The per-request Lexware key, or None outside an authenticated HTTP call.
 
@@ -227,8 +275,13 @@ class ClientRegistry:
 # ---------------------------------------------------------------------------
 
 
+def _txn_installation(data: dict[str, Any]) -> str | None:
+    return installation_from_url(data.get("resource"))
+
+
 class LexwareAuthCode(AuthorizationCode):
     api_key: str
+    installation: str | None = None
 
 
 class LexwareOAuthProvider(OAuthProvider):
@@ -329,7 +382,9 @@ class LexwareOAuthProvider(OAuthProvider):
             )
         client = self._clients.get(data["client_id"])
         client_name = client.client_name if client and client.client_name else "Deine App"
-        return _consent_page(txn=txn, client_name=client_name)
+        return _consent_page(
+            txn=txn, client_name=client_name, installation=_txn_installation(data)
+        )
 
     async def _consent_post(self, request: Request) -> Response:
         form = await request.form()
@@ -343,14 +398,20 @@ class LexwareOAuthProvider(OAuthProvider):
             )
         client = self._clients.get(data["client_id"])
         client_name = client.client_name if client and client.client_name else "Deine App"
+        installation = _txn_installation(data)
         if not api_key:
             return _consent_page(
-                txn=txn, client_name=client_name, error="Bitte einen API-Key eingeben."
+                txn=txn,
+                client_name=client_name,
+                installation=installation,
+                error="Bitte einen API-Key eingeben.",
             )
 
         ok, detail = await self._validate_key(api_key)
         if not ok:
-            return _consent_page(txn=txn, client_name=client_name, error=detail)
+            return _consent_page(
+                txn=txn, client_name=client_name, installation=installation, error=detail
+            )
 
         code = self._seal(
             "code",
@@ -362,6 +423,7 @@ class LexwareOAuthProvider(OAuthProvider):
                 "scopes": data["scopes"],
                 "resource": data.get("resource"),
                 "key": api_key,
+                "installation": installation,
             },
         )
         redirect = construct_redirect_uri(data["redirect_uri"], code=code, state=data["state"])
@@ -427,6 +489,7 @@ class LexwareOAuthProvider(OAuthProvider):
             # claude.ai always sends this, so a wrong type here 500s /token.
             resource=data.get("resource") or None,
             api_key=data["key"],
+            installation=data.get("installation"),
         )
 
     async def exchange_authorization_code(
@@ -437,11 +500,22 @@ class LexwareOAuthProvider(OAuthProvider):
             client_id=client.client_id,
             api_key=authorization_code.api_key,
             scopes=authorization_code.scopes,
+            installation=authorization_code.installation,
         )
 
-    def _issue_tokens(self, *, client_id: str, api_key: str, scopes: list[str]) -> OAuthToken:
-        access = self._seal("access", {"client_id": client_id, "key": api_key, "scopes": scopes})
-        refresh = self._seal("refresh", {"client_id": client_id, "key": api_key, "scopes": scopes})
+    def _issue_tokens(
+        self,
+        *,
+        client_id: str,
+        api_key: str,
+        scopes: list[str],
+        installation: str | None = None,
+    ) -> OAuthToken:
+        payload: dict[str, Any] = {"client_id": client_id, "key": api_key, "scopes": scopes}
+        if installation:
+            payload["installation"] = installation
+        access = self._seal("access", payload)
+        refresh = self._seal("refresh", payload)
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
@@ -484,6 +558,7 @@ class LexwareOAuthProvider(OAuthProvider):
             client_id=client.client_id,
             api_key=data["key"],
             scopes=scopes or data["scopes"],
+            installation=data.get("installation"),
         )
 
     # -- per-request verification -------------------------------------------------
@@ -495,12 +570,15 @@ class LexwareOAuthProvider(OAuthProvider):
             # the allow-list is locked out even with a still-valid token.
             if not (await self._allow.evaluate(data["key"])).allowed:
                 return None
+            claims: dict[str, Any] = {CLAIM_KEY: data["key"]}
+            if data.get("installation"):
+                claims[CLAIM_INSTALLATION] = data["installation"]
             return AccessToken(
                 token=token,
                 client_id=data["client_id"],
                 scopes=data["scopes"],
                 expires_at=None,
-                claims={CLAIM_KEY: data["key"]},
+                claims=claims,
             )
         # Direct mode: the Bearer value IS the Lexware API key (clients that
         # can send custom headers skip OAuth entirely). We accept it here and
@@ -574,8 +652,17 @@ _PAGE_STYLE = """
 """
 
 
-def _consent_page(*, txn: str, client_name: str, error: str = "") -> HTMLResponse:
+def _consent_page(
+    *, txn: str, client_name: str, installation: str | None = None, error: str = ""
+) -> HTMLResponse:
     error_html = f'<p class="err">{html.escape(error)}</p>' if error else ""
+    installation_html = (
+        f"<p>Diese Verbindung ist für die Lexware-Installation "
+        f"<strong>{html.escape(installation)}</strong> — gib den API-Key "
+        f"genau dieser Installation ein.</p>"
+        if installation
+        else ""
+    )
     body = f"""<!doctype html><html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
@@ -586,6 +673,7 @@ def _consent_page(*, txn: str, client_name: str, error: str = "") -> HTMLRespons
      Gib dazu deinen persönlichen Lexware-API-Key ein. Du bekommst ihn unter
      <a href="https://app.lexware.de/addons/public-api" target="_blank"
         rel="noopener">app.lexware.de/addons/public-api</a>.</p>
+  {installation_html}
   <input type="hidden" name="txn" value="{html.escape(txn)}">
   <input type="password" name="api_key" placeholder="Lexware API-Key" required autofocus>
   {error_html}
