@@ -13,12 +13,53 @@ from typing import Any
 import typer
 from dotenv import dotenv_values
 
-from lxw_cli.config import ENV_KEY, global_env_path, load_config, store_key
+from lxw_cli.config import (
+    ENV_KEY,
+    active_profile,
+    global_env_path,
+    load_config,
+    store_key,
+)
+from lxw_cli.core.errors import LexwareError
 from lxw_cli.output import console, err_console
 
 app = typer.Typer(no_args_is_help=True)
 
 MCP_NAME = "lexware"
+
+PROFILE_HELP = (
+    "Lexware-Installation (Profil, siehe `lxw profiles`). Registriert einen "
+    "eigenen Server 'lexware-<profil>' — mehrere Installationen laufen so "
+    "parallel. Ohne Angabe: globales --profile bzw. der Standard-Key."
+)
+
+
+def _resolve_profile(ctx: typer.Context, profile: str | None) -> str | None:
+    """Local `--profile` wins over the global `lxw --profile`; `default` → None."""
+    if profile is None:
+        profile = getattr(ctx.obj, "profile", None)
+    try:
+        return active_profile(profile or "")
+    except LexwareError as exc:
+        err_console.print(f"[red]Fehler:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+
+def mcp_name(profile: str | None) -> str:
+    """Server name in the Claude config: `lexware` or `lexware-<profile>`."""
+    return f"{MCP_NAME}-{profile}" if profile else MCP_NAME
+
+
+def _is_lexware_name(name: str) -> bool:
+    return name == MCP_NAME or name.startswith(f"{MCP_NAME}-")
+
+
+def _load_or_exit(profile: str | None):
+    try:
+        return load_config(profile or "")
+    except LexwareError as exc:
+        err_console.print(f"[red]Fehler:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
 
 
 def _desktop_config_dirs() -> list[Path]:
@@ -109,6 +150,18 @@ def _mcp_command() -> list[str]:
     return [sys.executable, "-m", "lxw_cli.mcp_server"]
 
 
+def _server_command(profile: str | None) -> list[str]:
+    """The launch command, pinned to a profile via `--profile` if given.
+
+    The profile travels as a visible argument (not an env var in the Claude
+    config), so `lxw mcp status` and the config file show at a glance which
+    installation each server talks to. The key itself stays in the profile
+    file and never enters the Claude config.
+    """
+    cmd = _mcp_command()
+    return [*cmd, "--profile", profile] if profile else cmd
+
+
 def _ensure_global_key(api_key: str) -> None:
     """Make sure the MCP server can resolve the key from the global config.
 
@@ -133,6 +186,8 @@ def _ensure_global_key(api_key: str) -> None:
 
 @app.command("install-claude")
 def install_claude(
+    ctx: typer.Context,
+    profile: str | None = typer.Option(None, "--profile", "-p", help=PROFILE_HELP),
     scope: str = typer.Option(
         "user", "--scope", help="user (global), project (per repo), oder local."
     ),
@@ -142,14 +197,17 @@ def install_claude(
 ) -> None:
     """Registriert den Lexware-MCP-Server bei Claude Code."""
     _check_claude()
-    config = load_config()  # validates LEXWARE_API_KEY
-    _ensure_global_key(config.api_key)
+    profile = _resolve_profile(ctx, profile)
+    name = mcp_name(profile)
+    config = _load_or_exit(profile)  # validates the key
+    if profile is None:
+        _ensure_global_key(config.api_key)
 
-    server_cmd = _mcp_command()
+    server_cmd = _server_command(profile)
 
     if force:
         subprocess.run(
-            ["claude", "mcp", "remove", MCP_NAME, "--scope", scope],
+            ["claude", "mcp", "remove", name, "--scope", scope],
             check=False,
             capture_output=True,
         )
@@ -158,7 +216,7 @@ def install_claude(
         "claude",
         "mcp",
         "add",
-        MCP_NAME,
+        name,
         "--scope",
         scope,
         "--",
@@ -174,7 +232,7 @@ def install_claude(
             )
         raise typer.Exit(code=result.returncode)
     console.print(
-        f"[green]✓[/green] Lexware MCP-Server bei Claude Code registriert "
+        f"[green]✓[/green] Lexware MCP-Server '{name}' bei Claude Code registriert "
         f"(scope={scope})."
     )
     console.print(
@@ -185,25 +243,30 @@ def install_claude(
 
 @app.command("uninstall-claude")
 def uninstall_claude(
+    ctx: typer.Context,
+    profile: str | None = typer.Option(None, "--profile", "-p", help=PROFILE_HELP),
     scope: str = typer.Option("user", "--scope", help="Gleicher Scope wie beim Install."),
 ) -> None:
     """Entfernt den Lexware-MCP-Server aus Claude Code."""
     _check_claude()
+    name = mcp_name(_resolve_profile(ctx, profile))
     result = subprocess.run(
-        ["claude", "mcp", "remove", MCP_NAME, "--scope", scope],
+        ["claude", "mcp", "remove", name, "--scope", scope],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         err_console.print(f"[red]Fehler:[/red] {result.stderr}")
         raise typer.Exit(code=result.returncode)
-    console.print(f"[green]✓[/green] Lexware MCP-Server entfernt (scope={scope}).")
+    console.print(f"[green]✓[/green] Lexware MCP-Server '{name}' entfernt (scope={scope}).")
 
 
 @app.command("install-desktop")
 def install_desktop(
+    ctx: typer.Context,
+    profile: str | None = typer.Option(None, "--profile", "-p", help=PROFILE_HELP),
     force: bool = typer.Option(
-        False, "--force", help="Bestehenden 'lexware'-Eintrag überschreiben."
+        False, "--force", help="Bestehenden Eintrag überschreiben."
     ),
 ) -> None:
     """Registriert den Lexware-MCP-Server bei Claude Desktop (und damit Cowork).
@@ -213,8 +276,11 @@ def install_desktop(
     komplett beenden — die laufende App schreibt die Datei aus dem
     Arbeitsspeicher zurück und überschreibt externe Änderungen.
     """
-    config = load_config()  # validates LEXWARE_API_KEY
-    _ensure_global_key(config.api_key)
+    profile = _resolve_profile(ctx, profile)
+    name = mcp_name(profile)
+    config = _load_or_exit(profile)  # validates the key
+    if profile is None:
+        _ensure_global_key(config.api_key)
 
     path = desktop_config_path()
     if not path.parent.is_dir():
@@ -226,26 +292,26 @@ def install_desktop(
 
     data = _load_desktop_config(path)
     servers = data.setdefault("mcpServers", {})
-    if MCP_NAME in servers and not force:
+    if name in servers and not force:
         err_console.print(
-            f"[yellow]Hinweis:[/yellow] '{MCP_NAME}' ist bereits in {path} "
+            f"[yellow]Hinweis:[/yellow] '{name}' ist bereits in {path} "
             "eingetragen. Mit `--force` überschreiben."
         )
         raise typer.Exit(code=1)
 
     # Absolute path: GUI apps don't inherit the shell PATH, so a bare
     # 'lxw-mcp' would not resolve when Desktop spawns the server.
-    command, *args = _mcp_command()
+    command, *args = _server_command(profile)
     entry: dict[str, Any] = {"command": command}
     if args:
         entry["args"] = args
-    servers[MCP_NAME] = entry
+    servers[name] = entry
 
     path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     console.print(
-        f"[green]✓[/green] Lexware MCP-Server in {path} eingetragen."
+        f"[green]✓[/green] Lexware MCP-Server '{name}' in {path} eingetragen."
     )
     console.print(
         "[bold]Wichtig:[/bold] Läuft Claude Desktop gerade, kann es diese "
@@ -256,19 +322,23 @@ def install_desktop(
 
 
 @app.command("uninstall-desktop")
-def uninstall_desktop() -> None:
+def uninstall_desktop(
+    ctx: typer.Context,
+    profile: str | None = typer.Option(None, "--profile", "-p", help=PROFILE_HELP),
+) -> None:
     """Entfernt den Lexware-MCP-Server aus Claude Desktop."""
+    name = mcp_name(_resolve_profile(ctx, profile))
     path = desktop_config_path()
     data = _load_desktop_config(path)
     servers = data.get("mcpServers") or {}
-    if MCP_NAME not in servers:
-        console.print(f"[yellow]✗[/yellow] '{MCP_NAME}' ist in {path} nicht eingetragen.")
+    if name not in servers:
+        console.print(f"[yellow]✗[/yellow] '{name}' ist in {path} nicht eingetragen.")
         raise typer.Exit(code=1)
-    del servers[MCP_NAME]
+    del servers[name]
     path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    console.print(f"[green]✓[/green] Lexware MCP-Server aus {path} entfernt.")
+    console.print(f"[green]✓[/green] Lexware MCP-Server '{name}' aus {path} entfernt.")
 
 
 @app.command("status")
@@ -277,10 +347,14 @@ def status() -> None:
     # Claude Code (via `claude mcp list`)
     if shutil.which("claude"):
         result = subprocess.run(["claude", "mcp", "list"], capture_output=True, text=True)
-        if result.returncode == 0 and MCP_NAME in result.stdout:
-            for line in result.stdout.splitlines():
-                if MCP_NAME in line:
-                    console.print(f"[green]✓[/green] Claude Code: {line.strip()}")
+        lines = [
+            line.strip()
+            for line in (result.stdout or "").splitlines()
+            if _is_lexware_name(line.strip().split(":", 1)[0].strip())
+        ]
+        if result.returncode == 0 and lines:
+            for line in lines:
+                console.print(f"[green]✓[/green] Claude Code: {line}")
         else:
             console.print(
                 "[yellow]✗[/yellow] Claude Code: nicht registriert. "
@@ -295,11 +369,12 @@ def status() -> None:
         console.print(f"[dim]– Claude Desktop: keine Konfiguration ({path}).[/dim]")
         return
     servers = _load_desktop_config(path).get("mcpServers") or {}
-    if MCP_NAME in servers:
-        entry = servers[MCP_NAME]
+    names = sorted(n for n in servers if _is_lexware_name(n))
+    for name in names:
+        entry = servers[name]
         cmd = " ".join([entry.get("command", "?"), *entry.get("args", [])])
-        console.print(f"[green]✓[/green] Claude Desktop: {cmd}")
-    else:
+        console.print(f"[green]✓[/green] Claude Desktop: {name}: {cmd}")
+    if not names:
         console.print(
             "[yellow]✗[/yellow] Claude Desktop: nicht registriert. "
             "Setup: [bold]lxw mcp install-desktop[/bold]"
@@ -307,8 +382,11 @@ def status() -> None:
 
 
 @app.command("serve")
-def serve() -> None:
+def serve(
+    ctx: typer.Context,
+    profile: str | None = typer.Option(None, "--profile", "-p", help=PROFILE_HELP),
+) -> None:
     """Startet den MCP-Server (intern von Claude Code aufgerufen — selten manuell nötig)."""
-    from lxw_cli.mcp_server import run as run_server
+    from lxw_cli.mcp_server import serve_stdio
 
-    run_server()
+    serve_stdio(_resolve_profile(ctx, profile))

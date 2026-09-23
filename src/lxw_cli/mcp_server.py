@@ -5,12 +5,16 @@ UI-agnostic operations the CLI uses, so both stay in sync by construction.
 
 Runs in two modes:
 
-- **stdio** (``lxw-mcp``): single-user, the key comes from the local
-  config exactly as for the CLI.
+- **stdio** (``lxw-mcp [--profile NAME]``): single-user, the key comes
+  from the local config exactly as for the CLI. One process serves one
+  Lexware installation; several installations run as several servers
+  (``lexware-oemedia``, ``lexware-demo``), each pinned to its profile.
 - **HTTP** (``lxw-mcp-http``): multi-user. Each request brings its own
   Lexware API key — either directly as ``Authorization: Bearer <key>``
   or wrapped in an OAuth token issued by :mod:`lxw_cli.mcp_auth`. No
-  key is ever stored on the server.
+  key is ever stored on the server. Several installations = several
+  connectors, each with its own key; ``?installation=<name>`` on the
+  connector URL labels them (and keeps the URLs distinct).
 """
 
 from __future__ import annotations
@@ -66,8 +70,18 @@ mcp: FastMCP = FastMCP(
         "such as 'FB2600682' or an id; PDF downloads return the PDF itself. When "
         "a document line item is based on an article, fetch that article first "
         "and copy its description into the line item's description.)"
+        # --- Several installations ---
+        " Several Lexware installations (companies) may be connected at the "
+        "same time as separate servers. Never mix up their data: before "
+        "creating or changing anything, make sure you use the installation "
+        "the user means — if unclear, ask, and the company profile tells you "
+        "which company a server belongs to."
     ),
 )
+_BASE_INSTRUCTIONS: str = mcp.instructions or ""
+
+# Profile this stdio process is pinned to (None = classic resolution).
+_profile: str | None = None
 
 class StatusHintMiddleware(Middleware):
     """Erklärt Serverfehler mit dem Lexware-Betriebsstatus.
@@ -116,7 +130,9 @@ def _client_get() -> LexwareClient:
     # stdio mode: single user, key from the local config.
     global _client
     if _client is None:
-        _client = LexwareClient(load_config())
+        # The profile was fully resolved at startup (`serve_stdio`); "" keeps
+        # the classic resolution without re-reading LEXWARE_PROFILE.
+        _client = LexwareClient(load_config(_profile or ""))
     return _client
 
 
@@ -239,7 +255,19 @@ def version() -> dict[str, str]:
     build = os.getenv("LXW_MCP_BUILD", "").strip() or __build__
     if build:
         info["stand"] = build
+    installation = _current_installation()
+    if installation:
+        info["installation"] = installation
     return info
+
+
+def _current_installation() -> str | None:
+    """Which Lexware installation this call talks to (label, if known)."""
+    if _in_http_request():
+        from lxw_cli.mcp_auth import request_installation
+
+        return request_installation()
+    return _profile
 
 
 @mcp.tool
@@ -833,9 +861,50 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
     return services.create_delivery_note(_client_get(), body)
 
 
+def serve_stdio(profile: str | None = None) -> None:
+    """Run the stdio server, optionally pinned to one Lexware profile.
+
+    The key is resolved (and validated to exist) up front: a server that
+    cannot start should fail loudly at launch, not on the first tool call —
+    and a pinned profile must never fall back to another installation.
+    """
+    global _profile, _client
+    _profile = profile
+    _client = None
+    if profile:
+        load_config(profile)  # raises ConfigError for a missing profile
+        mcp.instructions = (
+            f"{_BASE_INSTRUCTIONS} This server is connected to the Lexware "
+            f"installation '{profile}'. When talking about results, say which "
+            f"installation they come from if more than one is connected."
+        )
+    mcp.run()
+
+
+def _parse_profile_arg(argv: list[str]) -> str | None:
+    """Minimal `--profile NAME` / `--profile=NAME` / `-p NAME` parsing."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="lxw-mcp", add_help=True)
+    parser.add_argument("--profile", "-p", default=None)
+    args, _ = parser.parse_known_args(argv)
+    return args.profile
+
+
 def run() -> None:
     """Entry point for `lxw-mcp` — runs the MCP server over stdio."""
-    mcp.run()
+    import sys
+
+    from lxw_cli.config import active_profile
+    from lxw_cli.core.errors import ConfigError
+
+    try:
+        # `--profile` wins; otherwise LEXWARE_PROFILE (e.g. set via `-e`).
+        profile = active_profile(_parse_profile_arg(sys.argv[1:]))
+        serve_stdio(profile)
+    except ConfigError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 def run_http() -> None:

@@ -11,4 +11,4 @@ except PackageNotFoundError:  # uninstalliert, z.B. direkt aus dem Quellbaum
 # unterscheidbar, welcher Stand tatsächlich läuft — die Versionsnummer allein
 # sagt das nicht, wenn zwischen zwei Releases neu deployt wurde. Ein per
 # Deploy gesetztes LXW_MCP_BUILD überschreibt den Wert zur Laufzeit.
-__build__ = "2026-09-01 13:11 CEST"
+__build__ = "2026-09-23 10:40 CEST"
