@@ -3,9 +3,44 @@ name: Publish to PyPI
 on:
   push:
     tags: ["v*"]
+  # Manueller Start (Actions → "Publish to PyPI" → Run workflow) für den Fall,
+  # dass kein Tag gepusht werden kann: legt den Tag v<version> aus
+  # pyproject.toml auf dem gewählten Commit an und veröffentlicht dann.
+  workflow_dispatch:
 
 jobs:
+  tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag v<version> anlegen
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          tag="v${version}"
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            if [ "$(git rev-parse "${tag}^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::${tag} existiert bereits auf einem anderen Commit."
+              exit 1
+            fi
+            echo "${tag} existiert bereits auf diesem Commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "${tag}"
+          # Mit GITHUB_TOKEN gepushte Tags starten keinen weiteren Workflow —
+          # veröffentlicht wird daher in genau diesem Lauf.
+          git push origin "${tag}"
+
   build:
+    needs: tag
+    # Läuft auch beim Tag-Push, wo der tag-Job übersprungen wird.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +58,8 @@ jobs:
 
   publish:
     needs: build
+    # Explizit, sonst übersprungen, wenn der tag-Job beim Tag-Push entfällt.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     environment: pypi
     # Trusted Publishing: kein API-Token nötig — auf pypi.org unter
