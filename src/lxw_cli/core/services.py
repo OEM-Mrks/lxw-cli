@@ -993,10 +993,33 @@ def update_contact(
     change and can never break the version handshake.
     """
     current = client.get(f"/v1/contacts/{contact_id}")
+    changes = _guard_archived_unchanged(current, changes)
     merged = _merge_for_update(current, changes)
     _guard_single_contact_person(merged)
     validate_contact(merged)
     return _put_and_return_object(client, f"/v1/contacts/{contact_id}", merged)
+
+
+def _guard_archived_unchanged(
+    current: dict[str, Any], changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Refuse an attempt to (un)archive a contact instead of faking success.
+
+    `archived` is read-only in the Lexware API: a PUT carrying a different
+    value is accepted with HTTP 200 but silently ignored, so the update would
+    report success while nothing changed. A value equal to the current one
+    (e.g. a full contact passed back as `changes`) is a harmless no-op and is
+    simply dropped.
+    """
+    if "archived" not in changes:
+        return changes
+    if bool(changes["archived"]) != bool(current.get("archived")):
+        raise LexwareError(
+            "Kontakte lassen sich über die Lexware-API nicht archivieren oder "
+            "wiederherstellen — das geht nur direkt in der Lexware-Weboberfläche. "
+            "Es wurde nichts geändert."
+        )
+    return {k: v for k, v in changes.items() if k != "archived"}
 
 
 def _guard_single_contact_person(contact: dict[str, Any]) -> None:
