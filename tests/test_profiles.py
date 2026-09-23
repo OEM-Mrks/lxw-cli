@@ -129,7 +129,8 @@ def test_cli_profile_option_uses_profile_key(runner: CliRunner, two_profiles) ->
 def test_cli_unknown_profile_errors(runner: CliRunner) -> None:
     result = runner.invoke(app, ["-p", "ghost", "profile"])
     assert result.exit_code == 2
-    assert "lxw profiles add ghost" in result.stderr
+    # Rich bricht lange Zeilen (z.B. Windows-Pfade) um — Whitespace normalisieren.
+    assert "lxw profiles add ghost" in " ".join(result.stderr.split())
 
 
 def test_cli_invalid_profile_name(runner: CliRunner) -> None:
@@ -194,7 +195,24 @@ def desktop_config(monkeypatch: pytest.MonkeyPatch, tmp_path):
     return path
 
 
-def test_install_desktop_side_by_side(runner: CliRunner, desktop_config, two_profiles) -> None:
+def test_install_desktop_side_by_side(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, desktop_config, two_profiles
+) -> None:
+    import lxw_cli.commands.mcp as mcp_cmd_mod
+
+    # Kein echtes `claude` aufrufen (fehlt auf den CI-Runnern).
+    claude_list = (
+        "lexware: /usr/bin/lxw-mcp - ✓ Connected\n"
+        "lexware-demo: /usr/bin/lxw-mcp --profile demo - ✓ Connected\n"
+        "lexwarex: foo - ✓ Connected\n"
+        "other: npx x - ✓ Connected\n"
+    )
+    monkeypatch.setattr(
+        mcp_cmd_mod.subprocess,
+        "run",
+        lambda cmd, **_k: subprocess.CompletedProcess(cmd, 0, stdout=claude_list, stderr=""),
+    )
+
     assert runner.invoke(app, ["mcp", "install-desktop"]).exit_code == 0
     assert runner.invoke(app, ["mcp", "install-desktop", "--profile", "oemedia"]).exit_code == 0
     # Globales -p wirkt genauso.
@@ -212,7 +230,11 @@ def test_install_desktop_side_by_side(runner: CliRunner, desktop_config, two_pro
     assert "key-" not in raw and "test-key" not in raw
 
     status = runner.invoke(app, ["mcp", "status"])
-    assert "lexware-demo" in status.stdout and "lexware-oemedia" in status.stdout
+    assert status.exit_code == 0, status.stderr
+    out = " ".join(status.stdout.split())
+    assert "Claude Code: lexware-demo:" in out
+    assert "Claude Desktop: lexware-oemedia:" in out and "Claude Desktop: lexware-demo:" in out
+    assert "lexwarex" not in out and "other" not in out
 
     result = runner.invoke(app, ["mcp", "uninstall-desktop", "-p", "demo"])
     assert result.exit_code == 0, result.stderr
