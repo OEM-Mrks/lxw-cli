@@ -643,3 +643,40 @@ def test_download_dunning_pdf_by_uuid(client: LexwareClient) -> None:
         return_value=httpx.Response(200, content=b"%PDF-dun")
     )
     assert services.download_dunning_pdf(client, _UUID) == b"%PDF-dun"
+
+
+@respx.mock
+def test_update_contact_refuses_archive_change(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    current = {"id": _CONTACT_ID, "version": 2, "archived": False, "note": "alt"}
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json={}))
+    with pytest.raises(LexwareError, match="nicht archivieren"):
+        services.update_contact(client, _CONTACT_ID, {"archived": True, "note": "neu"})
+    # Weder Archiv-Status noch die übrigen Felder wurden geschrieben.
+    assert put.call_count == 0
+
+    # Wiederherstellen eines archivierten Kontakts ebenso.
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(
+        return_value=httpx.Response(200, json={**current, "archived": True})
+    )
+    with pytest.raises(LexwareError, match="nicht archivieren"):
+        services.update_contact(client, _CONTACT_ID, {"archived": False})
+    assert put.call_count == 0
+
+
+@respx.mock
+def test_update_contact_ignores_unchanged_archived(client: LexwareClient) -> None:
+    current = {"id": _CONTACT_ID, "version": 2, "archived": False, "note": "alt"}
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(
+        return_value=httpx.Response(200, json={"version": 3})
+    )
+    # Unveränderter Wert (z.B. ganzer Kontakt als changes) → normales Update.
+    services.update_contact(client, _CONTACT_ID, {"archived": False, "note": "neu"})
+    body = json.loads(put.calls.last.request.content)
+    assert body["note"] == "neu"
+    assert body["archived"] is False

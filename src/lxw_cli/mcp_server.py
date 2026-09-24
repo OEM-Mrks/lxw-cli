@@ -680,7 +680,9 @@ def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
       change business mail:{"emailAddresses": {"business": ["neu@example.com"]}}
       change billing addr: {"addresses": {"billing": [{"street": "Weg 1",
                             "zip": "50667", "city": "Köln", "countryCode": "DE"}]}}
-    Note: `archived` is read-only in the Lexware API and cannot be changed here.
+    Note: `archived` is read-only in the Lexware API — a request to archive or
+    un-archive a contact is refused with a clear message (only possible in
+    the Lexware web app); nothing is changed then.
     Längenlimits: Notiz `note` max. 1000 Zeichen; Anrede `salutation` max. 25.
     """
     return services.update_contact(_client_get(), contact_id, changes)
