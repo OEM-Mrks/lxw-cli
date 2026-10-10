@@ -483,3 +483,32 @@ async def test_body_size_limit(chunked: bool) -> None:
         else:
             resp = await c.post("/", content=b"x" * 25)
         assert resp.status_code == 413
+
+
+def test_stdio_upload_only_receipt_files_outside_hidden_dirs(tmp_path: Path) -> None:
+    import lxw_cli.mcp_server as server
+
+    key = tmp_path / "id_rsa"
+    key.write_bytes(b"secret")
+    with pytest.raises(ValueError, match="Nur Belegdateien"):
+        server._resolve_upload(str(key), None, None)
+    hidden = tmp_path / ".ssh"
+    hidden.mkdir()
+    (hidden / "x.pdf").write_bytes(b"%PDF")
+    with pytest.raises(ValueError, match="versteckten"):
+        server._resolve_upload(str(hidden / "x.pdf"), None, None)
+
+
+def test_stdio_download_refuses_hidden_output_dir(tmp_path: Path) -> None:
+    import lxw_cli.mcp_server as server
+
+    with pytest.raises(ValueError, match="versteckten"):
+        server._file_result(b"x", str(tmp_path / ".config" / "autostart"), "a.pdf")
+
+
+def test_stdio_download_neutralizes_foreign_extension(tmp_path: Path) -> None:
+    import lxw_cli.mcp_server as server
+
+    saved = server._file_result(b"x", str(tmp_path), "evil.desktop")
+    assert saved.endswith("evil.desktop.bin")
+    assert server._file_result(b"x", str(tmp_path), "beleg.PDF").endswith("beleg.PDF")

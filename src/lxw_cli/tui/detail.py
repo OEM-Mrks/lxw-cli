@@ -15,6 +15,7 @@ from typing import Any
 
 from rich.json import JSON
 from rich.table import Table
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -207,14 +208,14 @@ class DetailScreen(ModalScreen[None]):
             content.update(self._fields_table())
         self.query_one("#detail-title", Static).update(self._title_text())
 
-    def _title_text(self) -> str:
+    def _title_text(self) -> Text:
         view = "JSON" if self._show_json else "Felder"
-        return f"{self._heading} · Ansicht: {view} (j wechselt)"
+        return Text(f"{self._heading} · Ansicht: {view} (j wechselt)")
 
     def _fields_table(self) -> Table:
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_column("Feld", style="bold cyan", no_wrap=True)
         table.add_column("Wert", overflow="fold")
         for label, value in flatten_fields(self._data):
-            table.add_row(label, value)
+            table.add_row(Text(label), Text(value))
         return table

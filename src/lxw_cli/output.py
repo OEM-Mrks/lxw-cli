@@ -13,6 +13,7 @@ from typing import Any
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from lxw_cli.core.errors import LexwareError
 
@@ -92,7 +93,7 @@ def print_count(
         msg = f"{shown} von {total} {noun}"
     if note:
         msg += f" · {note}"
-    err_console.print(f"[dim]→ {msg}[/dim]")
+    err_console.print(Text(f"→ {msg}", style="dim"))
 
 
 def safe_filename(name: str) -> str:
@@ -169,7 +170,9 @@ def _render_table(
     for col in cols:
         table.add_column(col)
     for row in rows:
-        table.add_row(*[_stringify(row.get(c)) for c in cols])
+        # Text, not str: cell values come from the API and must not be
+        # interpreted as Rich markup ("[red]…" in a company name).
+        table.add_row(*[Text(_stringify(row.get(c))) for c in cols])
     console.print(table)
 
 

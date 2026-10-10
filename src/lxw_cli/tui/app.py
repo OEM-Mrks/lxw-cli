@@ -12,10 +12,12 @@ import asyncio
 import sys
 from typing import Any
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.widgets import (
     DataTable,
     Footer,
@@ -325,7 +327,8 @@ class LexwareTUI(App[None]):
             if needle and not any(needle in cell.casefold() for cell in cells):
                 continue
             self._records.append(record)
-            table.add_row(*cells)
+            # Text, not str: API values must not be parsed as markup.
+            table.add_row(*(Text(cell) for cell in cells))
         if self._records:
             row = 0
             if self._restore_row is not None:
@@ -345,13 +348,18 @@ class LexwareTUI(App[None]):
         title = self._current.title if self._current else "Einträge"
         return f"{n} {title}"
 
-    def _set_status(self, message: str) -> None:
-        self._last_status = message
-        self.query_one("#status", Static).update(message)
+    def _set_status(self, message: str, *, markup: str = "") -> None:
+        """Show a plain-text status (escaped — it often carries API data).
+
+        `markup` is a trusted prefix that may contain markup.
+        """
+        text = markup + escape(message)
+        self._last_status = text
+        self.query_one("#status", Static).update(text)
 
     def _error(self, message: str) -> None:
-        self._set_status(f"[red]Fehler:[/red] {message}")
-        self.notify(message, title="Fehler", severity="error", timeout=8)
+        self._set_status(message, markup="[red]Fehler:[/red] ")
+        self.notify(message, title="Fehler", severity="error", timeout=8, markup=False)
 
 
 def _summary(entity: Entity, result: Any) -> str:

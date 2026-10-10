@@ -599,6 +599,9 @@ async def test_consent_page_shows_redirect_target(server: str) -> None:
         page = await c.get(auth.headers["location"])
         assert page.status_code == 200
         assert "<strong>127.0.0.1</strong>" in page.text
+        assert page.headers["x-frame-options"] == "DENY"
+        assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert page.headers["cache-control"] == "no-store"
 
 
 # ---------------------------------------------------------------------------

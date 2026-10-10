@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import typer
+from rich.markup import escape
 
 from lxw_cli import __build__, __version__
 from lxw_cli.commands import (
@@ -74,7 +75,7 @@ class AppState:
             try:
                 config = load_config_interactive(self.profile)
             except LexwareError as exc:
-                err_console.print(f"[red]Fehler:[/red] {exc}")
+                err_console.print(f"[red]Fehler:[/red] {escape(str(exc))}")
                 raise typer.Exit(code=2) from exc
             self._client = LexwareClient(config)
         return self._client
@@ -204,7 +205,7 @@ def status_cmd(
 
     if state.output_format is OutputFormat.TABLE:
         color = "green" if report.operational else "red"
-        console.print(f"[{color}]{status_api.summary(report)}[/{color}]")
+        console.print(f"[{color}]{escape(status_api.summary(report))}[/{color}]")
     else:
         render(
             {
@@ -324,19 +325,19 @@ def _run() -> None:  # pragma: no cover
         try:
             run_tui(validate_profile_name(profile) if profile else None)
         except LexwareError as exc:
-            err_console.print(f"[red]Fehler:[/red] {exc}")
+            err_console.print(f"[red]Fehler:[/red] {escape(str(exc))}")
             raise SystemExit(2) from exc
         return
     try:
         app()
     except LexwareAPIError as exc:
-        err_console.print(f"[red]API-Fehler:[/red] {exc}")
+        err_console.print(f"[red]API-Fehler:[/red] {escape(str(exc))}")
         if isinstance(exc.body, dict) and exc.body:
             err_console.print(exc.body)
         _print_status_hint(exc)
         raise SystemExit(1) from exc
     except LexwareError as exc:
-        err_console.print(f"[red]Fehler:[/red] {exc}")
+        err_console.print(f"[red]Fehler:[/red] {escape(str(exc))}")
         _print_status_hint(exc)
         raise SystemExit(1) from exc
 
@@ -353,7 +354,7 @@ def _print_status_hint(exc: BaseException) -> None:  # pragma: no cover — I/O-
     except Exception:  # noqa: BLE001
         return
     if hint:
-        err_console.print(f"[yellow]{hint}[/yellow]")
+        err_console.print(f"[yellow]{escape(hint)}[/yellow]")
 
 
 if __name__ == "__main__":  # pragma: no cover

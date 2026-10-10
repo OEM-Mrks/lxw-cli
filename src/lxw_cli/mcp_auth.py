@@ -937,6 +937,21 @@ def _default_data_dir() -> Path:
 # Consent page HTML
 # ---------------------------------------------------------------------------
 
+# The consent page takes the API key: never frame it (clickjacking), never
+# cache it, never leak the txn in a Referer. No `form-action` on purpose —
+# browsers apply it to the redirect after the POST, which legitimately goes
+# to the client's (cross-origin) redirect URI.
+_PAGE_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "frame-ancestors 'none'; base-uri 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
 _PAGE_STYLE = """
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; margin: 0;
@@ -1002,7 +1017,7 @@ def _consent_page(
      Zugriffstoken eingebettet und bleibt damit auf deinem Gerät.</p>
   <button type="submit">Verbinden</button>
 </form></body></html>"""
-    return HTMLResponse(body)
+    return HTMLResponse(body, headers=_PAGE_HEADERS)
 
 
 def _error_page(message: str) -> HTMLResponse:
@@ -1012,4 +1027,4 @@ def _error_page(message: str) -> HTMLResponse:
 <title>Lexware MCP</title><style>{_PAGE_STYLE}</style></head><body>
 <div class="card"><h1>Verbindung nicht möglich</h1><p>{html.escape(message)}</p></div>
 </body></html>"""
-    return HTMLResponse(body, status_code=400)
+    return HTMLResponse(body, status_code=400, headers=_PAGE_HEADERS)

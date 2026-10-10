@@ -237,3 +237,35 @@ def test_non_length_details_still_surface(client: LexwareClient) -> None:
     with pytest.raises(LexwareAPIError) as excinfo:
         client.post("/v1/invoices", {})
     assert "must not be null" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/invoices/x/../contacts",
+        "/v1/invoices/x?foo=bar",
+        "/v1/invoices/x#frag",
+        "/v1/invoices/x%2F..",
+        "/v1/invoices/",
+        "/v1/invoices/a b",
+        "/v2/whatever",
+        "https://evil.example/v1/profile",
+    ],
+)
+def test_rejects_paths_with_injected_ids(client: LexwareClient, path: str) -> None:
+    """Ids from user/LLM input can't reach other endpoints or add params."""
+    from lxw_cli.core.errors import LexwareError
+
+    with respx.mock(assert_all_called=False) as router:
+        route = router.route()
+        with pytest.raises(LexwareError, match="Ungültige Kennung"):
+            client.get(path)
+        assert not route.called
+
+
+@respx.mock
+def test_accepts_regular_paths(client: LexwareClient) -> None:
+    respx.get("https://api.lexware.io/v1/order-confirmations/1a3c79ca-1804-4ab6-a3a5-915cc762b2ce/file").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    client.get("/v1/order-confirmations/1a3c79ca-1804-4ab6-a3a5-915cc762b2ce/file")

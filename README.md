@@ -469,6 +469,11 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 - **Funktionswunsch melden**: `request_feature` erstellt einen **unverbindlichen** Feature-Wunsch als fertigen Text (`subject`/`body`) samt Anbieter-Adresse (`to` = david@oemedia.de). Der Server **versendet nichts** — der Nutzer kopiert den Text und schickt ihn selbst per E-Mail. Dies ist ein Endkundenprodukt: der Assistent baut keine Funktionen selbst, sondern bietet bei fehlenden Funktionen nur diesen Weg an.
 
 Alle document-Tools (`get_*`, `download_*_pdf`) akzeptieren UUID **oder** Belegnummer (z.B. `FB2600682`) — **Ausnahme Mahnungen**: die sind nur per id ansprechbar (s.o.). PDFs landen in `~/Downloads/lexware/`.
+Zum Schutz vor Prompt-Injection gilt lokal: `output_dir` darf nicht in einem
+versteckten Verzeichnis liegen (z.B. `~/.config`), Uploads per `file_path` sind
+auf Belegdateien (pdf, jpg, jpeg, png, xml) außerhalb versteckter Verzeichnisse
+beschränkt, und heruntergeladene Dateien mit anderer Endung bekommen `.bin`
+angehängt.
 
 Die `list_*`-Tools bieten dieselben Optionen wie die CLI:
 
@@ -638,8 +643,10 @@ Freischalten (beide Quellen werden gemischt):
 
 Weitere Schalter: `LXW_MCP_ALLOWLIST_CONTACT` (Adresse in der Ablehn-Meldung),
 `LXW_MCP_ALLOWLIST_TTL` (Sekunden Cache für Key→Org-Auflösung, Standard 600),
-`LXW_MCP_ALLOWLIST_FAIL_OPEN=1` (bei nicht erreichbarer Lexware-API durchlassen
-statt sperren; Standard ist im `enforce`-Modus fail-closed).
+`LXW_MCP_ALLOWLIST_FAIL_OPEN=1` (bei nicht erreichbarer Lexware-API —
+Netzwerkfehler, HTTP 5xx/429 — durchlassen statt sperren; Standard ist im
+`enforce`-Modus fail-closed). Ein von Lexware abgelehnter Key oder ein Profil
+ohne Organisation bleibt auch mit Fail-Open gesperrt.
 
 Empfohlener Rollout: erst `log` fahren, `pending.json` sichten, bekannte Orgs in
 `allowlist.json` übernehmen, dann auf `enforce` umstellen.

@@ -142,6 +142,36 @@ def _default_download_dir() -> Path:
     return target
 
 
+# File types the server reads for upload or writes on download (stdio). The
+# model chooses paths and file names, and its input can include attacker-
+# controlled text (a contact note, an e-mail it was asked to process). These
+# limits keep such a prompt injection from attaching e.g. ~/.ssh/id_rsa or a
+# .env to a voucher, or dropping files into config/autostart directories.
+ALLOWED_FILE_EXTENSIONS = frozenset({"pdf", "jpg", "jpeg", "png", "xml"})
+
+
+def _hidden_component(path: Path) -> str | None:
+    for part in path.parts:
+        if part.startswith(".") and part not in (".", ".."):
+            return part
+    return None
+
+
+def _output_dir(output_dir: str | None) -> Path:
+    """Target directory for a download — default, or a checked custom one."""
+    if not output_dir:
+        return _default_download_dir()
+    target = Path(output_dir).expanduser().resolve()
+    hidden = _hidden_component(target)
+    if hidden:
+        raise ValueError(
+            f"output_dir {target} liegt in einem versteckten Verzeichnis ({hidden}) — "
+            "bitte ein normales Verzeichnis wählen."
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def _in_http_request() -> bool:
     try:
         from fastmcp.server.dependencies import get_http_request
@@ -162,8 +192,7 @@ def _pdf_result(data: bytes, output_dir: str | None, filename: str) -> str | Fil
         # strip a trailing .pdf from the name so it isn't doubled (foo.pdf.pdf).
         stem = safe_filename(filename).removesuffix(".pdf")
         return File(data=data, name=stem, format="pdf")
-    target_dir = Path(output_dir).expanduser() if output_dir else _default_download_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _output_dir(output_dir)
     # filename embeds the caller-supplied identifier — sanitize so it can
     # never escape target_dir.
     target = target_dir / safe_filename(filename)
@@ -196,11 +225,14 @@ def _file_result(
     ext_from_ct = _ext_from_content_type(content_type)
     if "." not in name and ext_from_ct:
         name = f"{name}.{ext_from_ct}"
+    # The name comes from the server's Content-Disposition — never let it
+    # pick an executable/config extension on the local disk.
+    if name.rpartition(".")[2].lower() not in ALLOWED_FILE_EXTENSIONS or "." not in name:
+        name = f"{name}.bin"
     if _in_http_request():
         stem, _, ext = name.rpartition(".") if "." in name else (name, "", "")
         return File(data=data, name=stem or name, format=ext or ext_from_ct or "bin")
-    target_dir = Path(output_dir).expanduser() if output_dir else _default_download_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _output_dir(output_dir)
     target = target_dir / name
     target.write_bytes(data)
     return str(target.resolve())
@@ -323,7 +355,19 @@ def _resolve_upload(
                 "file_path ist über die Online-Verbindung nicht möglich — "
                 "bitte die Datei als file_base64 zusammen mit filename senden."
             )
-        source = Path(file_path).expanduser()
+        source = Path(file_path).expanduser().resolve()
+        ext = source.suffix.lstrip(".").lower()
+        if ext not in ALLOWED_FILE_EXTENSIONS:
+            raise ValueError(
+                "Nur Belegdateien können hochgeladen werden ("
+                + ", ".join(sorted(ALLOWED_FILE_EXTENSIONS))
+                + f") — nicht {source.name}."
+            )
+        hidden = _hidden_component(source)
+        if hidden:
+            raise ValueError(
+                f"Dateien aus versteckten Verzeichnissen ({hidden}) werden nicht hochgeladen."
+            )
         if not source.is_file():
             raise ValueError(f"Datei nicht gefunden: {source}")
         size = source.stat().st_size

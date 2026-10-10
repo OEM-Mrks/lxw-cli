@@ -12,6 +12,7 @@ from typing import Any
 
 import typer
 from dotenv import dotenv_values
+from rich.markup import escape
 
 from lxw_cli.config import (
     ENV_KEY,
@@ -41,7 +42,7 @@ def _resolve_profile(ctx: typer.Context, profile: str | None) -> str | None:
     try:
         return active_profile(profile or "")
     except LexwareError as exc:
-        err_console.print(f"[red]Fehler:[/red] {exc}")
+        err_console.print(f"[red]Fehler:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from exc
 
 
@@ -58,7 +59,7 @@ def _load_or_exit(profile: str | None):
     try:
         return load_config(profile or "")
     except LexwareError as exc:
-        err_console.print(f"[red]Fehler:[/red] {exc}")
+        err_console.print(f"[red]Fehler:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from exc
 
 
@@ -111,7 +112,7 @@ def _load_desktop_config(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         err_console.print(
-            f"[red]Fehler:[/red] {path} enthält kein gültiges JSON ({exc}). "
+            f"[red]Fehler:[/red] {path} enthält kein gültiges JSON ({escape(str(exc))}). "
             "Bitte die Datei prüfen — sie wird nicht angefasst."
         )
         raise typer.Exit(code=2) from exc
@@ -224,7 +225,9 @@ def install_claude(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        err_console.print(f"[red]claude mcp add fehlgeschlagen:[/red]\n{result.stderr}")
+        err_console.print(
+            f"[red]claude mcp add fehlgeschlagen:[/red]\n{escape(result.stderr or '')}"
+        )
         if "already exists" in (result.stderr or "").lower():
             err_console.print(
                 "[yellow]Hinweis:[/yellow] Mit `--force` kannst du die "
@@ -256,7 +259,7 @@ def uninstall_claude(
         text=True,
     )
     if result.returncode != 0:
-        err_console.print(f"[red]Fehler:[/red] {result.stderr}")
+        err_console.print(f"[red]Fehler:[/red] {escape(result.stderr or '')}")
         raise typer.Exit(code=result.returncode)
     console.print(f"[green]✓[/green] Lexware MCP-Server '{name}' entfernt (scope={scope}).")
 

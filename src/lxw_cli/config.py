@@ -243,6 +243,8 @@ def _can_prompt() -> bool:
 def _prompt_and_store_key(profile: str | None = None) -> str:
     # Imported lazily: client imports this module at import time, so importing
     # it here avoids a circular import while still letting us validate the key.
+    from rich.markup import escape
+
     from lxw_cli.core.client import LexwareClient
     from lxw_cli.core.errors import LexwareAPIError
     from lxw_cli.output import err_console
@@ -277,7 +279,7 @@ def _prompt_and_store_key(profile: str | None = None) -> str:
                 )
                 continue
             # Network / server-side problem — let the user save it anyway.
-            err_console.print(f"[yellow]Konnte den Key nicht prüfen:[/yellow] {exc}")
+            err_console.print(f"[yellow]Konnte den Key nicht prüfen:[/yellow] {escape(str(exc))}")
             if not _confirm("Trotzdem speichern?"):
                 continue
 
@@ -288,7 +290,7 @@ def _prompt_and_store_key(profile: str | None = None) -> str:
         if isinstance(company, dict):
             name = company.get("companyName") or company.get("organizationId")
             if name:
-                who = f" — angemeldet als [bold]{name}[/bold]"
+                who = f" — angemeldet als [bold]{escape(str(name))}[/bold]"
         err_console.print(f"[green]✓[/green] API-Key gespeichert in {path}{who}.")
         return api_key
 
