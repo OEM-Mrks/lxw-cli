@@ -207,6 +207,22 @@ async def test_upload_voucher_file_requires_a_source() -> None:
             await c.call_tool("upload_voucher_file", {"identifier": _UUID})
 
 
+def test_upload_file_path_refused_over_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over HTTP file_path would read the server's disk — must be refused."""
+    import lxw_cli.mcp_server as server
+
+    secret = tmp_path / "secret.pdf"
+    secret.write_bytes(b"server-only")
+    monkeypatch.setattr(server, "_in_http_request", lambda: True)
+    with pytest.raises(ValueError, match="file_base64"):
+        server._resolve_upload(str(secret), None, "x.pdf")
+    # base64 keeps working over HTTP.
+    content, name = server._resolve_upload(None, base64.b64encode(b"ok").decode(), "a.pdf")
+    assert content == b"ok" and name == "a.pdf"
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_download_voucher_file_saves_to_path(tmp_path: Path) -> None:

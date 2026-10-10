@@ -224,6 +224,14 @@ def _resolve_upload(
             raise ValueError("file_base64 ist kein gültiges Base64.") from exc
         return content, safe_filename(filename or "anhang")
     if file_path:
+        # Over HTTP `file_path` would name a file on the *server*: any caller
+        # with a valid Lexware key could attach server files (secrets, config)
+        # to a voucher in their own account and download them again.
+        if _in_http_request():
+            raise ValueError(
+                "file_path ist über die Online-Verbindung nicht möglich — "
+                "bitte die Datei als file_base64 zusammen mit filename senden."
+            )
         source = Path(file_path).expanduser()
         if not source.is_file():
             raise ValueError(f"Datei nicht gefunden: {source}")
@@ -705,10 +713,11 @@ def upload_voucher_file(
 
     Use this to add the scan/PDF of a receipt to a voucher after creating it.
     `identifier` is the voucher's number or id. Provide the file either as a
-    local `file_path` (when running on the user's machine) OR as `file_base64`
-    together with a `filename`. Accepted files are typically PDF, JPG or PNG;
-    the system enforces its own size limit and reports clearly if a file is
-    rejected. Returns a reference to the stored attachment.
+    local `file_path` (only when running on the user's machine — refused over
+    the online/HTTP connection) OR as `file_base64` together with a
+    `filename`. Accepted files are typically PDF, JPG or PNG; the system
+    enforces its own size limit and reports clearly if a file is rejected.
+    Returns a reference to the stored attachment.
     """
     content, name = _resolve_upload(file_path, file_base64, filename)
     return services.upload_voucher_file(

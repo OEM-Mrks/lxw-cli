@@ -555,6 +555,15 @@ Hinweise für den Betrieb:
   sichtbare Basis-URL (sie steht in den OAuth-Metadaten).
 - PDF-Downloads liefern über HTTP das PDF als Binärinhalt zurück (statt eines
   Pfads auf der Server-Platte wie im stdio-Modus).
+- OAuth-Clients dürfen sich nur mit Redirect-URIs auf vertrauenswürdige Ziele
+  registrieren: Loopback (`127.0.0.1`, `localhost`, `[::1]`, beliebiger Port),
+  `https://` auf `claude.ai`, `claude.com`, `chatgpt.com`, `chat.openai.com`,
+  `vscode.dev`, sowie die Schemes `cursor:`, `vscode:`, `vscode-insiders:`.
+  Weitere Ziele per `LXW_MCP_REDIRECT_ALLOW` (kommagetrennt; Host = https auf
+  diesem Host, `schema:` = eigenes Schema). Registrierungen mit anderen Zielen
+  werden abgelehnt, bereits gespeicherte ignoriert.
+- Datei-Uploads akzeptieren über HTTP nur `file_base64`; `file_path` (eine
+  Datei auf der Server-Platte) wird abgelehnt.
 - Der Server prüft im Hintergrund alle 10 Minuten den Lexware-Betriebsstatus
   (`LXW_MCP_STATUS_REFRESH`, Sekunden; `0` schaltet das ab). Das hält den
   Zwischenspeicher warm, damit der Fehlerpfad sofort antwortet, und schreibt

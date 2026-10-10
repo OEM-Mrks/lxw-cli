@@ -43,6 +43,7 @@ from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
     RefreshToken,
+    RegistrationError,
     construct_redirect_uri,
 )
 from mcp.server.auth.settings import ClientRegistrationOptions
@@ -70,6 +71,30 @@ ENV_PUBLIC_URL = "LXW_MCP_PUBLIC_URL"
 ENV_HOST = "LXW_MCP_HOST"
 ENV_PORT = "LXW_MCP_PORT"
 ENV_DATA_DIR = "LXW_MCP_DATA_DIR"
+ENV_REDIRECT_ALLOW = "LXW_MCP_REDIRECT_ALLOW"
+
+# OAuth redirect targets a client may register. Dynamic Client Registration is
+# open to anyone, so without this list an attacker could register a client
+# that redirects to their own host, send a victim the /authorize link and
+# collect the authorization code — i.e. the victim's Lexware key — after the
+# victim pasted it on our genuine consent page. Allowed by default:
+# - loopback (any port) for native clients such as Claude Code or Cursor,
+# - the callback hosts of the hosted clients (https only),
+# - the private-use schemes of desktop editors.
+# LXW_MCP_REDIRECT_ALLOW adds entries (comma-separated): a bare host allows
+# https on that host, "scheme:" allows a private-use scheme.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+DEFAULT_REDIRECT_HOSTS = frozenset(
+    {
+        "claude.ai",
+        "claude.com",
+        "chatgpt.com",
+        "chat.openai.com",
+        "vscode.dev",
+        "insiders.vscode.dev",
+    }
+)
+DEFAULT_REDIRECT_SCHEMES = frozenset({"cursor", "vscode", "vscode-insiders"})
 
 CLAIM_KEY = "lexware_api_key"
 CLAIM_INSTALLATION = "lexware_installation"
@@ -165,6 +190,52 @@ class ClientPool:
 
 
 pool = ClientPool()
+
+
+def _redirect_allow_extra() -> tuple[set[str], set[str]]:
+    hosts: set[str] = set()
+    schemes: set[str] = set()
+    for raw in os.environ.get(ENV_REDIRECT_ALLOW, "").split(","):
+        entry = raw.strip().lower()
+        if not entry:
+            continue
+        if entry.endswith(":"):
+            schemes.add(entry[:-1])
+        else:
+            hosts.add(entry)
+    return hosts, schemes
+
+
+def redirect_uri_allowed(uri: str) -> bool:
+    """True if an OAuth redirect URI points to a trusted target (see above)."""
+    try:
+        parts = urlsplit(str(uri))
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    extra_hosts, extra_schemes = _redirect_allow_extra()
+    if scheme in ("http", "https"):
+        # Userinfo ("https://claude.ai@evil.example") is never legitimate here.
+        if parts.username is not None or parts.password is not None:
+            return False
+        if host in _LOOPBACK_HOSTS:
+            return True
+        return scheme == "https" and host in (DEFAULT_REDIRECT_HOSTS | extra_hosts)
+    return scheme in (DEFAULT_REDIRECT_SCHEMES | extra_schemes)
+
+
+def _client_redirects_allowed(info: OAuthClientInformationFull) -> bool:
+    uris = info.redirect_uris or []
+    return bool(uris) and all(redirect_uri_allowed(str(u)) for u in uris)
+
+
+def _redirect_target(uri: str) -> str:
+    """Short, human-readable form of a redirect URI for the consent page."""
+    parts = urlsplit(uri)
+    if parts.scheme in ("http", "https"):
+        return parts.hostname or uri
+    return f"{parts.scheme}:"
 
 
 def installation_from_url(url: str | None) -> str | None:
@@ -337,9 +408,22 @@ class LexwareOAuthProvider(OAuthProvider):
     # -- DCR ------------------------------------------------------------------
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self._clients.get(client_id)
+        info = self._clients.get(client_id)
+        # Re-checked on every lookup so registrations stored before the
+        # allow-list existed (or entries removed from it later) stop working.
+        if info is None or not _client_redirects_allowed(info):
+            return None
+        return info
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        if not _client_redirects_allowed(client_info):
+            raise RegistrationError(
+                error="invalid_redirect_uri",
+                error_description=(
+                    "redirect_uri not allowed on this server (allowed: loopback, "
+                    f"known MCP clients, or entries in {ENV_REDIRECT_ALLOW})"
+                ),
+            )
         self._clients.put(client_info)
 
     # -- authorize → consent page --------------------------------------------
@@ -380,10 +464,15 @@ class LexwareOAuthProvider(OAuthProvider):
                 "Der Anmelde-Link ist abgelaufen oder ungültig. "
                 "Bitte starte die Verbindung in deiner App erneut."
             )
-        client = self._clients.get(data["client_id"])
-        client_name = client.client_name if client and client.client_name else "Deine App"
+        client = await self.get_client(data["client_id"])
+        if client is None:
+            return _error_page("Diese App ist für die Anmeldung nicht zugelassen.")
+        client_name = client.client_name or "Deine App"
         return _consent_page(
-            txn=txn, client_name=client_name, installation=_txn_installation(data)
+            txn=txn,
+            client_name=client_name,
+            installation=_txn_installation(data),
+            redirect_target=_redirect_target(data["redirect_uri"]),
         )
 
     async def _consent_post(self, request: Request) -> Response:
@@ -396,21 +485,29 @@ class LexwareOAuthProvider(OAuthProvider):
                 "Die Sitzung ist abgelaufen. Bitte starte die Verbindung "
                 "in deiner App erneut."
             )
-        client = self._clients.get(data["client_id"])
-        client_name = client.client_name if client and client.client_name else "Deine App"
+        client = await self.get_client(data["client_id"])
+        if client is None or not redirect_uri_allowed(data["redirect_uri"]):
+            return _error_page("Diese App ist für die Anmeldung nicht zugelassen.")
+        client_name = client.client_name or "Deine App"
         installation = _txn_installation(data)
+        redirect_target = _redirect_target(data["redirect_uri"])
         if not api_key:
             return _consent_page(
                 txn=txn,
                 client_name=client_name,
                 installation=installation,
+                redirect_target=redirect_target,
                 error="Bitte einen API-Key eingeben.",
             )
 
         ok, detail = await self._validate_key(api_key)
         if not ok:
             return _consent_page(
-                txn=txn, client_name=client_name, installation=installation, error=detail
+                txn=txn,
+                client_name=client_name,
+                installation=installation,
+                redirect_target=redirect_target,
+                error=detail,
             )
 
         code = self._seal(
@@ -653,9 +750,23 @@ _PAGE_STYLE = """
 
 
 def _consent_page(
-    *, txn: str, client_name: str, installation: str | None = None, error: str = ""
+    *,
+    txn: str,
+    client_name: str,
+    installation: str | None = None,
+    redirect_target: str = "",
+    error: str = "",
 ) -> HTMLResponse:
     error_html = f'<p class="err">{html.escape(error)}</p>' if error else ""
+    # The client name is self-declared at registration; the redirect target
+    # is what actually receives the access, so show it explicitly.
+    target_html = (
+        f"<p>Nach dem Verbinden geht der Zugriff an "
+        f"<strong>{html.escape(redirect_target)}</strong>. Gib deinen Key nur "
+        f"ein, wenn du die Verbindung gerade selbst gestartet hast.</p>"
+        if redirect_target
+        else ""
+    )
     installation_html = (
         f"<p>Diese Verbindung ist für die Lexware-Installation "
         f"<strong>{html.escape(installation)}</strong> — gib den API-Key "
@@ -674,6 +785,7 @@ def _consent_page(
      <a href="https://app.lexware.de/addons/public-api" target="_blank"
         rel="noopener">app.lexware.de/addons/public-api</a>.</p>
   {installation_html}
+  {target_html}
   <input type="hidden" name="txn" value="{html.escape(txn)}">
   <input type="password" name="api_key" placeholder="Lexware API-Key" required autofocus>
   {error_html}

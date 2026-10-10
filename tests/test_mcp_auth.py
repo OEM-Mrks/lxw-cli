@@ -472,3 +472,111 @@ def test_installation_from_url() -> None:
     assert installation_from_url("https://x/mcp?installation=../bad") is None
     assert installation_from_url("https://x/mcp") is None
     assert installation_from_url(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Redirect-URI allow-list (DCR phishing guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://127.0.0.1:9/cb",
+        "http://localhost:33418/callback",
+        "http://[::1]:8080/cb",
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
+        "https://chatgpt.com/connector_platform_oauth_redirect",
+        "cursor://anysphere.cursor-retrieval/oauth/callback",
+    ],
+)
+def test_redirect_uri_allowed(uri: str) -> None:
+    from lxw_cli.mcp_auth import redirect_uri_allowed
+
+    assert redirect_uri_allowed(uri)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://evil.example/cb",
+        "http://claude.ai/api/mcp/auth_callback",  # not https
+        "https://claude.ai.evil.example/cb",
+        "https://claude.ai@evil.example/cb",
+        "javascript:alert(1)",
+        "data:text/html,x",
+    ],
+)
+def test_redirect_uri_rejected(uri: str) -> None:
+    from lxw_cli.mcp_auth import redirect_uri_allowed
+
+    assert not redirect_uri_allowed(uri)
+
+
+def test_redirect_allow_env_extends_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lxw_cli.mcp_auth import redirect_uri_allowed
+
+    monkeypatch.setenv("LXW_MCP_REDIRECT_ALLOW", "app.example.com, myapp:")
+    assert redirect_uri_allowed("https://app.example.com/cb")
+    assert redirect_uri_allowed("myapp://oauth")
+    assert not redirect_uri_allowed("http://app.example.com/cb")
+
+
+@pytest.mark.asyncio
+async def test_registration_with_foreign_redirect_is_rejected(server: str) -> None:
+    async with httpx.AsyncClient(base_url=server, follow_redirects=False) as c:
+        reg = await c.post(
+            "/register",
+            json={
+                "client_name": "Claude",
+                "redirect_uris": ["https://evil.example/cb"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        assert reg.status_code == 400, reg.text
+        assert reg.json()["error"] == "invalid_redirect_uri"
+
+
+@pytest.mark.asyncio
+async def test_stored_client_with_foreign_redirect_is_ignored(tmp_path) -> None:
+    """Registrations from before the allow-list must not keep working."""
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    provider = _provider(data_dir=tmp_path)
+    info = OAuthClientInformationFull(
+        client_id="legacy",
+        redirect_uris=["https://evil.example/cb"],
+        token_endpoint_auth_method="none",
+    )
+    provider._clients.put(info)  # bypasses register_client on purpose
+    assert await provider.get_client("legacy") is None
+
+
+@pytest.mark.asyncio
+async def test_consent_page_shows_redirect_target(server: str) -> None:
+    async with httpx.AsyncClient(base_url=server, follow_redirects=False) as c:
+        reg = await c.post(
+            "/register",
+            json={
+                "client_name": "target client",
+                "redirect_uris": ["http://127.0.0.1:9/cb"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        client = reg.json()
+        _, challenge = _pkce()
+        auth = await c.get(
+            "/authorize",
+            params={
+                "client_id": client["client_id"],
+                "response_type": "code",
+                "redirect_uri": "http://127.0.0.1:9/cb",
+                "state": "s",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+        page = await c.get(auth.headers["location"])
+        assert page.status_code == 200
+        assert "<strong>127.0.0.1</strong>" in page.text
