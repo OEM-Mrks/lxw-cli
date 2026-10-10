@@ -522,7 +522,7 @@ mitbringt**. Der Server speichert keine Keys — er ist ein zustandsloser Proxy.
 
 ```bash
 LXW_MCP_PUBLIC_URL=https://mcp.example.com \
-LXW_MCP_SECRET='ein-langes-zufaelliges-secret' \
+LXW_MCP_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
 lxw-mcp-http    # lauscht auf 127.0.0.1:8788 (LXW_MCP_HOST/LXW_MCP_PORT)
 ```
 
@@ -542,14 +542,25 @@ Zwei Wege, den eigenen Key mitzubringen:
    stellt ein Zugriffstoken aus, in dem der Key **verschlüsselt eingebettet**
    ist (Fernet, `LXW_MCP_SECRET`). Das Token liegt beim Client auf dem Gerät
    des Nutzers; der Server entschlüsselt es nur pro Request und persistiert
-   ausschließlich die OAuth-Client-Registrierungen (`LXW_MCP_DATA_DIR`,
-   Standard `~/.config/lexware/mcp/`).
+   ausschließlich die OAuth-Client-Registrierungen und eine Sperrliste
+   widerrufener Tokens (`LXW_MCP_DATA_DIR`, Standard `~/.config/lexware/mcp/`).
 
 Hinweise für den Betrieb:
 
 - `LXW_MCP_SECRET` **fest setzen** — ohne festes Secret werden alle Tokens
   bei jedem Neustart ungültig. Rotieren des Secrets invalidiert bewusst alle
-  ausgestellten Tokens.
+  ausgestellten Tokens. Das Secret muss ein Fernet-Key oder mindestens
+  32 Zeichen lang sein, sonst startet der Server nicht.
+- Refresh-Tokens sind einmalig gültig (Rotation). Wird ein bereits benutzter
+  Refresh-Token erneut vorgelegt, wird die gesamte Verbindung gesperrt.
+  Tokens lassen sich über `/revoke` (RFC 7009) widerrufen; die Sperrliste
+  liegt in `revoked.json` und überlebt Neustarts.
+- Grenzen: Client-Registrierung max. 10 pro IP in 10 Minuten und max. 2000
+  gespeicherte Clients (älteste fallen raus); Request-Body max. 16 MB,
+  Datei-Upload max. 10 MB. Der Reverse-Proxy muss `X-Forwarded-For` setzen;
+  läuft er nicht auf demselben Host, seine Adresse in `FORWARDED_ALLOW_IPS`
+  eintragen (uvicorn) — sonst zählt das Registrierungs-Limit alle Clients
+  als eine IP.
 - Vor den Server gehört ein HTTPS-Reverse-Proxy (Caddy, nginx, Cloudflare
   Tunnel, `tailscale serve`, …); `LXW_MCP_PUBLIC_URL` ist die von außen
   sichtbare Basis-URL (sie steht in den OAuth-Metadaten).

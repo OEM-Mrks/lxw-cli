@@ -14,12 +14,13 @@ Two ways for a user to bring their own Lexware API key:
    secret** (Fernet). The token is stored by the *client*, so the key
    keeps living on the user's device — the server only decrypts it per
    request and persists nothing but the OAuth client registrations
-   (redirect URIs, no secrets of value).
+   (redirect URIs, no secrets of value) and a denylist of revoked grants.
 
 Every token this module mints (transaction, authorization code, access
 and refresh token) is such a sealed, self-contained Fernet blob — the
 server needs no session store and survives restarts as long as
-``LXW_MCP_SECRET`` stays the same.
+``LXW_MCP_SECRET`` stays the same. Only what must stop working (revoked
+grants, spent refresh tokens) is recorded, see :class:`TokenDenylist`.
 """
 
 from __future__ import annotations
@@ -29,8 +30,10 @@ import hashlib
 import html
 import json
 import os
+import secrets
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -46,21 +49,20 @@ from mcp.server.auth.provider import (
     RegistrationError,
     construct_redirect_uri,
 )
-from mcp.server.auth.settings import ClientRegistrationOptions
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lxw_cli.config import DEFAULT_BASE_URL, config_dir
 from lxw_cli.mcp_allowlist import AllowList
 
 # Token lifetimes (seconds). Enforced via Fernet's built-in timestamp.
-# Tokens are stateless and cannot be individually revoked, so the refresh
-# TTL is kept modest: a leaked refresh token stays usable at most this long
-# (rotating LXW_MCP_SECRET or revoking the Lexware key kills it sooner). A
-# client used regularly keeps refreshing well within the window.
+# Refresh tokens are single-use (rotated on every refresh); presenting one a
+# second time revokes the whole grant ("token family"), see TokenDenylist.
 ACCESS_TOKEN_TTL = 24 * 3600
 REFRESH_TOKEN_TTL = 30 * 24 * 3600
 AUTH_CODE_TTL = 10 * 60
@@ -72,6 +74,17 @@ ENV_HOST = "LXW_MCP_HOST"
 ENV_PORT = "LXW_MCP_PORT"
 ENV_DATA_DIR = "LXW_MCP_DATA_DIR"
 ENV_REDIRECT_ALLOW = "LXW_MCP_REDIRECT_ALLOW"
+
+# A passphrase secret is stretched with a single SHA-256 (see
+# fernet_from_secret), so it must carry enough entropy on its own to resist
+# offline guessing against a token an attacker obtained for their own key.
+MIN_SECRET_LENGTH = 32
+
+# Dynamic Client Registration is unauthenticated; bound it so nobody can fill
+# the disk or make every registration rewrite a huge file.
+REGISTRATION_RATE_LIMIT = 10  # registrations per client IP …
+REGISTRATION_RATE_WINDOW = 600  # … within this many seconds
+MAX_REGISTERED_CLIENTS = 2000  # oldest registrations are dropped beyond this
 
 # OAuth redirect targets a client may register. Dynamic Client Registration is
 # open to anyone, so without this list an attacker could register a client
@@ -117,6 +130,26 @@ DEFAULT_SCOPE = "mcp"
 # ---------------------------------------------------------------------------
 # Secret / Fernet helpers
 # ---------------------------------------------------------------------------
+
+
+def secret_problem(secret: str) -> str | None:
+    """Why `secret` is unfit for sealing tokens, or None if it is fine.
+
+    A proper Fernet key (32 random bytes) is always fine; a passphrase must be
+    at least MIN_SECRET_LENGTH characters.
+    """
+    try:
+        Fernet(secret.encode())
+        return None
+    except (ValueError, TypeError):
+        pass
+    if len(secret) < MIN_SECRET_LENGTH:
+        return (
+            f"{ENV_SECRET} ist zu kurz ({len(secret)} Zeichen, mindestens "
+            f"{MIN_SECRET_LENGTH}). Ein geeignetes Secret erzeugen mit: "
+            "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+        )
+    return None
 
 
 def fernet_from_secret(secret: str) -> Fernet:
@@ -319,10 +352,21 @@ class ClientRegistry:
             return None
         return OAuthClientInformationFull.model_validate(raw)
 
-    def put(self, info: OAuthClientInformationFull) -> None:
+    def put(
+        self, info: OAuthClientInformationFull, max_clients: int | None = None
+    ) -> None:
         with self._lock:
             data = self._read()
             data[info.client_id] = json.loads(info.model_dump_json(exclude_none=True))
+            if max_clients is not None and len(data) > max_clients:
+                # Drop the oldest registrations; a legitimate client that is
+                # hit re-registers on its next connect.
+                by_age = sorted(
+                    data, key=lambda k: data[k].get("client_id_issued_at") or 0
+                )
+                for stale in by_age[: len(data) - max_clients]:
+                    if stale != info.client_id:
+                        del data[stale]
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
@@ -339,6 +383,120 @@ class ClientRegistry:
             return json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
+
+
+class TokenDenylist:
+    """Revoked grants and spent refresh tokens (the only token state kept).
+
+    Tokens stay self-contained; this list only records what must no longer
+    work: whole grants ("families", revoked via /revoke or on refresh-token
+    reuse) and individual refresh tokens already exchanged. Entries carry an
+    expiry and vanish once the tokens they block would have expired anyway,
+    so the file stays small. Single-process, like the auth-code replay guard.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._entries: dict[str, float] = self._read()
+
+    def contains(self, entry: str) -> bool:
+        with self._lock:
+            expiry = self._entries.get(entry)
+            return expiry is not None and expiry > time.time()
+
+    def add(self, entry: str, ttl: float) -> bool:
+        """Add `entry`; returns False if it was already present (atomic)."""
+        now = time.time()
+        with self._lock:
+            expiry = self._entries.get(entry)
+            if expiry is not None and expiry > now:
+                return False
+            self._entries = {k: v for k, v in self._entries.items() if v > now}
+            self._entries[entry] = now + ttl
+            self._write()
+            return True
+
+    def _read(self) -> dict[str, float]:
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        now = time.time()
+        return {
+            str(k): float(v)
+            for k, v in raw.items()
+            if isinstance(v, (int, float)) and v > now
+        }
+
+    def _write(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._entries), encoding="utf-8")
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            tmp.replace(self._path)
+        except OSError:
+            # The in-memory list still protects this process.
+            pass
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class RateLimiter:
+    """Sliding-window counter per key (client IP)."""
+
+    def __init__(self, limit: int, window: float) -> None:
+        self._limit = limit
+        self._window = window
+        self._lock = threading.Lock()
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            # Forget idle keys so the map can't grow without bound.
+            for k in [k for k, q in self._hits.items() if not q or now - q[-1] > self._window]:
+                del self._hits[k]
+            hits = self._hits.setdefault(key, deque())
+            while hits and now - hits[0] > self._window:
+                hits.popleft()
+            if len(hits) >= self._limit:
+                return False
+            hits.append(now)
+            return True
+
+
+class _RateLimitedEndpoint:
+    """ASGI wrapper that answers 429 once a client IP exceeds the limit."""
+
+    def __init__(self, app: ASGIApp, limiter: RateLimiter) -> None:
+        self._app = app
+        self._limiter = limiter
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") == "http" and scope.get("method") == "POST":
+            client = scope.get("client")
+            ip = client[0] if client else "unknown"
+            if not self._limiter.allow(ip):
+                response = JSONResponse(
+                    {
+                        "error": "invalid_client_metadata",
+                        "error_description": "too many registrations, retry later",
+                    },
+                    status_code=429,
+                    headers={"Retry-After": str(REGISTRATION_RATE_WINDOW)},
+                )
+                await response(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -373,10 +531,15 @@ class LexwareOAuthProvider(OAuthProvider):
                 valid_scopes=[DEFAULT_SCOPE],
                 default_scopes=[DEFAULT_SCOPE],
             ),
+            revocation_options=RevocationOptions(enabled=True),
         )
         self._fernet = fernet_from_secret(secret)
         directory = data_dir or _default_data_dir()
         self._clients = ClientRegistry(directory / "oauth-clients.json")
+        self._denylist = TokenDenylist(directory / "revoked.json")
+        self._register_limiter = RateLimiter(
+            REGISTRATION_RATE_LIMIT, REGISTRATION_RATE_WINDOW
+        )
         self._lexware_base_url = (
             lexware_base_url
             or os.getenv("LEXWARE_API_BASE_URL", DEFAULT_BASE_URL)
@@ -424,7 +587,7 @@ class LexwareOAuthProvider(OAuthProvider):
                     f"known MCP clients, or entries in {ENV_REDIRECT_ALLOW})"
                 ),
             )
-        self._clients.put(client_info)
+        self._clients.put(client_info, max_clients=MAX_REGISTERED_CLIENTS)
 
     # -- authorize → consent page --------------------------------------------
 
@@ -449,7 +612,16 @@ class LexwareOAuthProvider(OAuthProvider):
         return f"{str(self.base_url).rstrip('/')}/consent?{query}"
 
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
-        routes = super().get_routes(mcp_path)
+        routes = [
+            Route(
+                r.path,
+                endpoint=_RateLimitedEndpoint(r.endpoint, self._register_limiter),
+                methods=list(r.methods or []),
+            )
+            if isinstance(r, Route) and r.path == "/register"
+            else r
+            for r in super().get_routes(mcp_path)
+        ]
         routes.append(Route("/consent", self._consent_get, methods=["GET"]))
         routes.append(Route("/consent", self._consent_post, methods=["POST"]))
         return routes
@@ -598,6 +770,7 @@ class LexwareOAuthProvider(OAuthProvider):
             api_key=authorization_code.api_key,
             scopes=authorization_code.scopes,
             installation=authorization_code.installation,
+            family=secrets.token_urlsafe(16),
         )
 
     def _issue_tokens(
@@ -607,10 +780,15 @@ class LexwareOAuthProvider(OAuthProvider):
         api_key: str,
         scopes: list[str],
         installation: str | None = None,
+        family: str | None = None,
     ) -> OAuthToken:
         payload: dict[str, Any] = {"client_id": client_id, "key": api_key, "scopes": scopes}
         if installation:
             payload["installation"] = installation
+        # The grant ("token family") all tokens of one connection share — the
+        # unit that /revoke and refresh-token reuse detection switch off.
+        if family:
+            payload["fam"] = family
         access = self._seal("access", payload)
         refresh = self._seal("refresh", payload)
         return OAuthToken(
@@ -635,6 +813,15 @@ class LexwareOAuthProvider(OAuthProvider):
         data = self._unseal("refresh", refresh_token, REFRESH_TOKEN_TTL)
         if data is None or data["client_id"] != client.client_id:
             return None
+        if self._revoked(refresh_token, data):
+            return None
+        # Rotation: each refresh token works exactly once. Marked here (like
+        # auth codes) so concurrent /token calls can't both pass. A second
+        # use means the token leaked — revoke the whole grant, which also
+        # kills the access/refresh tokens the legitimate exchange produced.
+        if not self._denylist.add(f"rt:{_token_digest(refresh_token)}", REFRESH_TOKEN_TTL):
+            self._revoke_family(refresh_token, data)
+            return None
         return RefreshToken(
             token=refresh_token,
             client_id=data["client_id"],
@@ -656,13 +843,31 @@ class LexwareOAuthProvider(OAuthProvider):
             api_key=data["key"],
             scopes=scopes or data["scopes"],
             installation=data.get("installation"),
+            # Tokens minted before families existed start one now.
+            family=data.get("fam") or secrets.token_urlsafe(16),
         )
+
+    # -- revocation ------------------------------------------------------------
+
+    def _revoked(self, token: str, data: dict[str, Any]) -> bool:
+        fam = data.get("fam")
+        if fam and self._denylist.contains(f"fam:{fam}"):
+            return True
+        return self._denylist.contains(f"tok:{_token_digest(token)}")
+
+    def _revoke_family(self, token: str, data: dict[str, Any]) -> None:
+        fam = data.get("fam")
+        # Legacy tokens without a family can only be blocked individually.
+        entry = f"fam:{fam}" if fam else f"tok:{_token_digest(token)}"
+        self._denylist.add(entry, REFRESH_TOKEN_TTL)
 
     # -- per-request verification -------------------------------------------------
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         data = self._unseal("access", token, ACCESS_TOKEN_TTL)
         if data is not None:
+            if self._revoked(token, data):
+                return None
             # KYC gate (cached). Also re-checked here so an org removed from
             # the allow-list is locked out even with a still-valid token.
             if not (await self._allow.evaluate(data["key"])).allowed:
@@ -694,10 +899,14 @@ class LexwareOAuthProvider(OAuthProvider):
         return None
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        # Tokens are self-contained; there is nothing server-side to revoke.
-        # A leaked token dies with the Lexware key it wraps (revoke it at
-        # https://app.lexware.de/addons/public-api) or a rotated LXW_MCP_SECRET.
-        return None
+        # Revoking either token of a grant switches off the whole grant
+        # (RFC 7009 allows revoking related tokens). A raw Lexware key used
+        # as direct Bearer is not ours to revoke — that happens at Lexware.
+        for kind, ttl in (("access", ACCESS_TOKEN_TTL), ("refresh", REFRESH_TOKEN_TTL)):
+            data = self._unseal(kind, token.token, ttl)
+            if data is not None:
+                self._revoke_family(token.token, data)
+                return
 
 
 def _looks_like_api_key(token: str) -> bool:
