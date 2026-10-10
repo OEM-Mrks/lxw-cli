@@ -11,6 +11,7 @@ import sys
 from getpass import getpass
 
 import typer
+from rich.markup import escape
 
 from lxw_cli.config import (
     DEFAULT_PROFILE,
@@ -33,7 +34,7 @@ def _name_or_exit(name: str) -> str:
     try:
         return validate_profile_name(name)
     except LexwareError as exc:
-        err_console.print(f"[red]Fehler:[/red] {exc}")
+        err_console.print(f"[red]Fehler:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from exc
 
 
@@ -86,14 +87,14 @@ def add(
         try:
             who = _company(Config(api_key=api_key, base_url=_trusted_base_url()))
         except LexwareAPIError as exc:
-            err_console.print(f"[red]Key abgelehnt:[/red] {exc}")
+            err_console.print(f"[red]Key abgelehnt:[/red] {escape(str(exc))}")
             raise typer.Exit(code=2) from exc
         except LexwareError as exc:
-            err_console.print(f"[red]Key konnte nicht geprüft werden:[/red] {exc}")
+            err_console.print(f"[red]Key konnte nicht geprüft werden:[/red] {escape(str(exc))}")
             raise typer.Exit(code=2) from exc
 
     path = store_key(api_key, name)
-    suffix = f" — {who}" if who else ""
+    suffix = f" — {escape(who)}" if who else ""
     console.print(f"[green]✓[/green] Profil '{name}' gespeichert in {path}{suffix}.")
     console.print(
         f"Nutzen: [bold]lxw -p {name} invoices list[/bold] · "
@@ -119,9 +120,9 @@ def list_cmd(
         if check:
             try:
                 company = _company(load_config(name))
-                line += f"  [green]✓ {company}[/green]"
+                line += f"  [green]✓ {escape(str(company))}[/green]"
             except LexwareError as exc:
-                line += f"  [red]✗ {exc}[/red]"
+                line += f"  [red]✗ {escape(str(exc))}[/red]"
         console.print(line)
 
 

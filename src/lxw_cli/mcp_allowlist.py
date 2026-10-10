@@ -42,7 +42,9 @@ Configuration (all optional; the gate is inert unless mode != off):
                                  an org takes effect on the next request even
                                  within the TTL.
 - ``LXW_MCP_ALLOWLIST_FAIL_OPEN````1`` to allow through when the profile
-                                 lookup itself fails (Lexware unreachable).
+                                 lookup itself fails (network error, Lexware
+                                 5xx/429). Never applies to a key Lexware
+                                 rejects or a profile without organization.
                                  Default is fail-closed in ``enforce`` mode.
                                  Note the tools would fail anyway if Lexware
                                  is truly down, and an attacker still needs a
@@ -159,6 +161,12 @@ class AllowList:
 
         if self._mode != MODE_OFF:
             self._load_file()
+            if self._fail_open and self._mode == MODE_ENFORCE:
+                log.warning(
+                    "%s ist aktiv: Ist Lexware nicht erreichbar, werden auch nicht "
+                    "freigeschaltete Organisationen durchgelassen.",
+                    ENV_FAIL_OPEN,
+                )
             log.info(
                 "Allow-List-Gate aktiv: Modus=%s, %d Org(s) freigeschaltet, "
                 "fail_open=%s.",
@@ -177,11 +185,17 @@ class AllowList:
         """Gate a request given only the API key (resolves the org, cached)."""
         if self._mode == MODE_OFF:
             return Decision(allowed=True, mode=MODE_OFF)
-        org_id, company, email = await self._resolve(api_key)
+        org_id, company, email, unreachable = await self._resolve(api_key)
         if org_id is None:
-            # Could not determine the org (Lexware unreachable / odd response).
-            allowed = self._fail_open or self._mode == MODE_LOG
-            return Decision(allowed=allowed, mode=self._mode, reason="unreachable")
+            # Fail-open only covers a lookup that could not happen (network
+            # error, Lexware 5xx/429). A key Lexware rejected (401/403) or a
+            # profile without organization stays blocked in enforce mode.
+            if unreachable:
+                allowed = self._fail_open or self._mode == MODE_LOG
+                return Decision(allowed=allowed, mode=self._mode, reason="unreachable")
+            return Decision(
+                allowed=self._mode == MODE_LOG, mode=self._mode, reason="no_org"
+            )
         return self._decide(org_id, company, email)
 
     def evaluate_profile(self, profile: dict[str, Any], api_key: str) -> Decision:
@@ -196,8 +210,9 @@ class AllowList:
         company = profile.get("companyName") if isinstance(profile, dict) else None
         email = _user_email_of(profile)
         if org_id is None:
-            allowed = self._fail_open or self._mode == MODE_LOG
-            return Decision(allowed=allowed, mode=self._mode, reason="unreachable")
+            # The profile was fetched fine — just without an organization.
+            # That is not "unreachable", so fail-open does not apply.
+            return Decision(allowed=self._mode == MODE_LOG, mode=self._mode, reason="no_org")
         with self._lock:
             self._cache[_key_digest(api_key)] = (org_id, company, email, time.monotonic())
         return self._decide(org_id, company, email)
@@ -220,13 +235,14 @@ class AllowList:
 
     async def _resolve(
         self, api_key: str
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, bool]:
+        """(org_id, company, email, unreachable) for a key, cached."""
         digest = _key_digest(api_key)
         now = time.monotonic()
         with self._lock:
             entry = self._cache.get(digest)
             if entry is not None and now - entry[3] <= self._ttl:
-                return entry[0], entry[1], entry[2]
+                return entry[0], entry[1], entry[2], False
         # Cache miss (or stale): ask Lexware who this key belongs to.
         org_id = company = email = None
         try:
@@ -236,6 +252,9 @@ class AllowList:
                     headers={"Authorization": f"Bearer {api_key}",
                              "Accept": "application/json"},
                 )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                log.warning("Profil-Abruf für Allow-List: HTTP %s", resp.status_code)
+                return None, None, None, True
             if resp.status_code < 400:
                 profile = resp.json()
                 org_id = _org_id_of(profile)
@@ -243,11 +262,11 @@ class AllowList:
                 email = _user_email_of(profile)
         except (httpx.HTTPError, ValueError) as exc:
             log.warning("Profil-Abruf für Allow-List fehlgeschlagen: %s", exc)
-            return None, None, None
+            return None, None, None, True
         if org_id is not None:
             with self._lock:
                 self._cache[digest] = (org_id, company, email, now)
-        return org_id, company, email
+        return org_id, company, email, False
 
     def _is_listed(self, org_id: str) -> bool:
         self._load_file()  # cheap: only re-reads on mtime change

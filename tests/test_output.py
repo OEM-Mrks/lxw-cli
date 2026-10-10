@@ -114,3 +114,13 @@ def test_write_binary_unwritable_raises_clean_error(tmp_path: Path) -> None:
     a_file.write_text("x")
     with pytest.raises(LexwareError, match="Konnte Datei nicht schreiben"):
         write_binary(b"data", a_file / "nested.pdf", default_name="x.pdf")
+
+
+def test_table_does_not_interpret_markup_from_data(capsys) -> None:
+    render(
+        [{"name": "[red]Evil[/red] GmbH"}],
+        OutputFormat.TABLE,
+        columns=["name"],
+    )
+    out = capsys.readouterr().out
+    assert "[red]Evil[/red] GmbH" in out

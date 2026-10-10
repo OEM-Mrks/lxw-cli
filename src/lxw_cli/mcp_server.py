@@ -142,6 +142,36 @@ def _default_download_dir() -> Path:
     return target
 
 
+# File types the server reads for upload or writes on download (stdio). The
+# model chooses paths and file names, and its input can include attacker-
+# controlled text (a contact note, an e-mail it was asked to process). These
+# limits keep such a prompt injection from attaching e.g. ~/.ssh/id_rsa or a
+# .env to a voucher, or dropping files into config/autostart directories.
+ALLOWED_FILE_EXTENSIONS = frozenset({"pdf", "jpg", "jpeg", "png", "xml"})
+
+
+def _hidden_component(path: Path) -> str | None:
+    for part in path.parts:
+        if part.startswith(".") and part not in (".", ".."):
+            return part
+    return None
+
+
+def _output_dir(output_dir: str | None) -> Path:
+    """Target directory for a download — default, or a checked custom one."""
+    if not output_dir:
+        return _default_download_dir()
+    target = Path(output_dir).expanduser().resolve()
+    hidden = _hidden_component(target)
+    if hidden:
+        raise ValueError(
+            f"output_dir {target} liegt in einem versteckten Verzeichnis ({hidden}) — "
+            "bitte ein normales Verzeichnis wählen."
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def _in_http_request() -> bool:
     try:
         from fastmcp.server.dependencies import get_http_request
@@ -162,8 +192,7 @@ def _pdf_result(data: bytes, output_dir: str | None, filename: str) -> str | Fil
         # strip a trailing .pdf from the name so it isn't doubled (foo.pdf.pdf).
         stem = safe_filename(filename).removesuffix(".pdf")
         return File(data=data, name=stem, format="pdf")
-    target_dir = Path(output_dir).expanduser() if output_dir else _default_download_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _output_dir(output_dir)
     # filename embeds the caller-supplied identifier — sanitize so it can
     # never escape target_dir.
     target = target_dir / safe_filename(filename)
@@ -196,14 +225,104 @@ def _file_result(
     ext_from_ct = _ext_from_content_type(content_type)
     if "." not in name and ext_from_ct:
         name = f"{name}.{ext_from_ct}"
+    # The name comes from the server's Content-Disposition — never let it
+    # pick an executable/config extension on the local disk.
+    if name.rpartition(".")[2].lower() not in ALLOWED_FILE_EXTENSIONS or "." not in name:
+        name = f"{name}.bin"
     if _in_http_request():
         stem, _, ext = name.rpartition(".") if "." in name else (name, "", "")
         return File(data=data, name=stem or name, format=ext or ext_from_ct or "bin")
-    target_dir = Path(output_dir).expanduser() if output_dir else _default_download_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _output_dir(output_dir)
     target = target_dir / name
     target.write_bytes(data)
     return str(target.resolve())
+
+
+# Upper bound for one uploaded attachment. Lexware enforces its own (smaller)
+# limits; this only keeps a caller from making the server decode and hold
+# arbitrarily large payloads in memory.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# Whole HTTP request body (JSON-RPC envelope around a base64 upload: 4/3 of
+# MAX_UPLOAD_BYTES plus headroom).
+MAX_HTTP_BODY_BYTES = 16 * 1024 * 1024
+
+
+def _too_large(size: int) -> ValueError:
+    return ValueError(
+        f"Datei zu groß ({size / 1024 / 1024:.1f} MB) — höchstens "
+        f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB."
+    )
+
+
+class BodySizeLimit:
+    """ASGI middleware rejecting request bodies above a byte limit (413).
+
+    Checks Content-Length up front and counts streamed (chunked) bodies, so
+    an oversized request never ends up fully in memory.
+    """
+
+    def __init__(self, app: Any, max_bytes: int = MAX_HTTP_BODY_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers") or []:
+            if name == b"content-length":
+                try:
+                    too_big = int(value) > self.max_bytes
+                except ValueError:
+                    too_big = True
+                if too_big:
+                    await self._reject(send)
+                    return
+
+        received = 0
+        exceeded = False
+        response_started = False
+
+        async def limited_receive() -> Any:
+            nonlocal received, exceeded
+            if exceeded:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    # Pretend the client went away: the app stops reading
+                    # without buffering the rest, and we answer 413 below.
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Any) -> None:
+            nonlocal response_started
+            if exceeded:
+                return  # the 413 below is the only answer
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not exceeded:
+                raise
+        if exceeded and not response_started:
+            await self._reject(send)
+
+    @staticmethod
+    async def _reject(send: Any) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"Request body too large"})
 
 
 def _resolve_upload(
@@ -218,15 +337,42 @@ def _resolve_upload(
     if file_base64:
         import base64
 
+        # Check before decoding: base64 is 4/3 of the decoded size.
+        approx = len(file_base64) * 3 // 4
+        if approx > MAX_UPLOAD_BYTES:
+            raise _too_large(approx)
         try:
             content = base64.b64decode(file_base64, validate=True)
         except Exception as exc:  # noqa: BLE001 — report as a clean tool error
             raise ValueError("file_base64 ist kein gültiges Base64.") from exc
         return content, safe_filename(filename or "anhang")
     if file_path:
-        source = Path(file_path).expanduser()
+        # Over HTTP `file_path` would name a file on the *server*: any caller
+        # with a valid Lexware key could attach server files (secrets, config)
+        # to a voucher in their own account and download them again.
+        if _in_http_request():
+            raise ValueError(
+                "file_path ist über die Online-Verbindung nicht möglich — "
+                "bitte die Datei als file_base64 zusammen mit filename senden."
+            )
+        source = Path(file_path).expanduser().resolve()
+        ext = source.suffix.lstrip(".").lower()
+        if ext not in ALLOWED_FILE_EXTENSIONS:
+            raise ValueError(
+                "Nur Belegdateien können hochgeladen werden ("
+                + ", ".join(sorted(ALLOWED_FILE_EXTENSIONS))
+                + f") — nicht {source.name}."
+            )
+        hidden = _hidden_component(source)
+        if hidden:
+            raise ValueError(
+                f"Dateien aus versteckten Verzeichnissen ({hidden}) werden nicht hochgeladen."
+            )
         if not source.is_file():
             raise ValueError(f"Datei nicht gefunden: {source}")
+        size = source.stat().st_size
+        if size > MAX_UPLOAD_BYTES:
+            raise _too_large(size)
         return source.read_bytes(), safe_filename(filename or source.name)
     raise ValueError(
         "Bitte eine Datei angeben: file_path (lokale Datei) oder file_base64 "
@@ -705,10 +851,11 @@ def upload_voucher_file(
 
     Use this to add the scan/PDF of a receipt to a voucher after creating it.
     `identifier` is the voucher's number or id. Provide the file either as a
-    local `file_path` (when running on the user's machine) OR as `file_base64`
-    together with a `filename`. Accepted files are typically PDF, JPG or PNG;
-    the system enforces its own size limit and reports clearly if a file is
-    rejected. Returns a reference to the stored attachment.
+    local `file_path` (only when running on the user's machine — refused over
+    the online/HTTP connection) OR as `file_base64` together with a
+    `filename`. Accepted files are typically PDF, JPG or PNG; the system
+    enforces its own size limit and reports clearly if a file is rejected.
+    Returns a reference to the stored attachment.
     """
     content, name = _resolve_upload(file_path, file_base64, filename)
     return services.upload_voucher_file(
@@ -934,12 +1081,15 @@ def run_http() -> None:
     import secrets
     import sys
 
+    from starlette.middleware import Middleware as ASGIMiddleware
+
     from lxw_cli.mcp_auth import (
         ENV_HOST,
         ENV_PORT,
         ENV_PUBLIC_URL,
         ENV_SECRET,
         LexwareOAuthProvider,
+        secret_problem,
     )
 
     host = os.environ.get(ENV_HOST, "127.0.0.1")
@@ -954,6 +1104,11 @@ def run_http() -> None:
             "Neustart ungültig. Für den Dauerbetrieb ein festes Secret setzen.",
             file=sys.stderr,
         )
+    else:
+        problem = secret_problem(secret)
+        if problem:
+            print(f"Fehler: {problem}", file=sys.stderr)
+            raise SystemExit(2)
 
     try:
         refresh = float(os.environ.get("LXW_MCP_STATUS_REFRESH", "600"))
@@ -963,7 +1118,12 @@ def run_http() -> None:
         status.start_background_refresh(refresh)
 
     mcp.auth = LexwareOAuthProvider(public_url=public_url, secret=secret)
-    mcp.run(transport="http", host=host, port=port)
+    mcp.run(
+        transport="http",
+        host=host,
+        port=port,
+        middleware=[ASGIMiddleware(BodySizeLimit)],
+    )
 
 
 if __name__ == "__main__":

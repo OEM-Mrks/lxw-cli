@@ -258,6 +258,25 @@ async def test_full_oauth_flow_and_tool_call(server: str) -> None:
         sent_auth = profile_route.calls.last.request.headers["authorization"]
         assert sent_auth == "Bearer user-key-1234567890"
 
+    # 7. Revoking the token (RFC 7009) locks it out of the MCP endpoint.
+    async with httpx.AsyncClient(base_url=server) as c:
+        rev = await c.post(
+            "/revoke",
+            # The SDK's RevocationRequest requires the field even for public
+            # clients; an empty value is accepted.
+            data={"token": access, "client_id": client["client_id"], "client_secret": ""},
+        )
+        assert rev.status_code == 200, rev.text
+        denied = await c.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}},
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Authorization": f"Bearer {access}",
+            },
+        )
+        assert denied.status_code == 401
+
 
 @pytest.mark.asyncio
 async def test_direct_bearer_tool_call_and_pdf_binary(server: str) -> None:
@@ -472,3 +491,251 @@ def test_installation_from_url() -> None:
     assert installation_from_url("https://x/mcp?installation=../bad") is None
     assert installation_from_url("https://x/mcp") is None
     assert installation_from_url(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Redirect-URI allow-list (DCR phishing guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://127.0.0.1:9/cb",
+        "http://localhost:33418/callback",
+        "http://[::1]:8080/cb",
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
+        "https://chatgpt.com/connector_platform_oauth_redirect",
+        "cursor://anysphere.cursor-retrieval/oauth/callback",
+    ],
+)
+def test_redirect_uri_allowed(uri: str) -> None:
+    from lxw_cli.mcp_auth import redirect_uri_allowed
+
+    assert redirect_uri_allowed(uri)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://evil.example/cb",
+        "http://claude.ai/api/mcp/auth_callback",  # not https
+        "https://claude.ai.evil.example/cb",
+        "https://claude.ai@evil.example/cb",
+        "javascript:alert(1)",
+        "data:text/html,x",
+    ],
+)
+def test_redirect_uri_rejected(uri: str) -> None:
+    from lxw_cli.mcp_auth import redirect_uri_allowed
+
+    assert not redirect_uri_allowed(uri)
+
+
+def test_redirect_allow_env_extends_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lxw_cli.mcp_auth import redirect_uri_allowed
+
+    monkeypatch.setenv("LXW_MCP_REDIRECT_ALLOW", "app.example.com, myapp:")
+    assert redirect_uri_allowed("https://app.example.com/cb")
+    assert redirect_uri_allowed("myapp://oauth")
+    assert not redirect_uri_allowed("http://app.example.com/cb")
+
+
+@pytest.mark.asyncio
+async def test_registration_with_foreign_redirect_is_rejected(server: str) -> None:
+    async with httpx.AsyncClient(base_url=server, follow_redirects=False) as c:
+        reg = await c.post(
+            "/register",
+            json={
+                "client_name": "Claude",
+                "redirect_uris": ["https://evil.example/cb"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        assert reg.status_code == 400, reg.text
+        assert reg.json()["error"] == "invalid_redirect_uri"
+
+
+@pytest.mark.asyncio
+async def test_stored_client_with_foreign_redirect_is_ignored(tmp_path) -> None:
+    """Registrations from before the allow-list must not keep working."""
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    provider = _provider(data_dir=tmp_path)
+    info = OAuthClientInformationFull(
+        client_id="legacy",
+        redirect_uris=["https://evil.example/cb"],
+        token_endpoint_auth_method="none",
+    )
+    provider._clients.put(info)  # bypasses register_client on purpose
+    assert await provider.get_client("legacy") is None
+
+
+@pytest.mark.asyncio
+async def test_consent_page_shows_redirect_target(server: str) -> None:
+    async with httpx.AsyncClient(base_url=server, follow_redirects=False) as c:
+        reg = await c.post(
+            "/register",
+            json={
+                "client_name": "target client",
+                "redirect_uris": ["http://127.0.0.1:9/cb"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        client = reg.json()
+        _, challenge = _pkce()
+        auth = await c.get(
+            "/authorize",
+            params={
+                "client_id": client["client_id"],
+                "response_type": "code",
+                "redirect_uri": "http://127.0.0.1:9/cb",
+                "state": "s",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+        page = await c.get(auth.headers["location"])
+        assert page.status_code == 200
+        assert "<strong>127.0.0.1</strong>" in page.text
+        assert page.headers["x-frame-options"] == "DENY"
+        assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert page.headers["cache-control"] == "no-store"
+
+
+# ---------------------------------------------------------------------------
+# Refresh rotation, revocation, secret strength, registration limits
+# ---------------------------------------------------------------------------
+
+
+def _oauth_client(client_id: str = "c1"):
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    return OAuthClientInformationFull(
+        client_id=client_id,
+        redirect_uris=["http://127.0.0.1:9/cb"],
+        token_endpoint_auth_method="none",
+    )
+
+
+async def _grant(provider: LexwareOAuthProvider):
+    return provider._issue_tokens(
+        client_id="c1", api_key="k" * 20, scopes=["mcp"], family="fam-1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_is_single_use_and_reuse_revokes_grant(tmp_path) -> None:
+    provider = _provider(data_dir=tmp_path)
+    client = _oauth_client()
+    first = await _grant(provider)
+
+    rt = await provider.load_refresh_token(client, first.refresh_token)
+    assert rt is not None
+    second = await provider.exchange_refresh_token(client, rt, [])
+    assert await provider.load_access_token(second.access_token) is not None
+
+    # Replaying the spent refresh token fails …
+    assert await provider.load_refresh_token(client, first.refresh_token) is None
+    # … and switches off the whole grant, including the freshly issued tokens.
+    assert await provider.load_access_token(second.access_token) is None
+    assert await provider.load_refresh_token(client, second.refresh_token) is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_token_switches_off_grant_and_persists(tmp_path) -> None:
+    provider = _provider(data_dir=tmp_path)
+    tokens = await _grant(provider)
+    access = await provider.load_access_token(tokens.access_token)
+    assert access is not None
+
+    await provider.revoke_token(access)
+    assert await provider.load_access_token(tokens.access_token) is None
+    assert await provider.load_refresh_token(_oauth_client(), tokens.refresh_token) is None
+
+    # Survives a restart (same data dir, same secret).
+    restarted = _provider(data_dir=tmp_path)
+    assert await restarted.load_access_token(tokens.access_token) is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_ignores_direct_bearer_key(tmp_path) -> None:
+    provider = _provider(data_dir=tmp_path)
+    raw = "a2b4c6d8-0000-4444-8888-abcdefabcdef"
+    token = await provider.load_access_token(raw)
+    assert token is not None
+    await provider.revoke_token(token)
+    assert await provider.load_access_token(raw) is not None
+
+
+def test_secret_problem() -> None:
+    from cryptography.fernet import Fernet
+
+    from lxw_cli.mcp_auth import secret_problem
+
+    assert secret_problem(Fernet.generate_key().decode()) is None
+    assert secret_problem("x" * 32) is None
+    assert "zu kurz" in (secret_problem("ein-langes-zufaelliges-secret") or "")
+
+
+def test_rate_limiter() -> None:
+    from lxw_cli.mcp_auth import RateLimiter
+
+    limiter = RateLimiter(limit=2, window=60)
+    assert limiter.allow("1.2.3.4")
+    assert limiter.allow("1.2.3.4")
+    assert not limiter.allow("1.2.3.4")
+    assert limiter.allow("5.6.7.8")
+
+
+def test_client_registry_caps_and_drops_oldest(tmp_path) -> None:
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    from lxw_cli.mcp_auth import ClientRegistry
+
+    reg = ClientRegistry(tmp_path / "clients.json")
+    for i in range(4):
+        reg.put(
+            OAuthClientInformationFull(
+                client_id=f"c{i}",
+                client_id_issued_at=1000 + i,
+                redirect_uris=["http://127.0.0.1:9/cb"],
+            ),
+            max_clients=3,
+        )
+    assert reg.get("c0") is None
+    assert all(reg.get(f"c{i}") is not None for i in (1, 2, 3))
+
+
+@pytest.mark.asyncio
+async def test_registration_is_rate_limited(server: str) -> None:
+    from lxw_cli.mcp_auth import REGISTRATION_RATE_LIMIT, RateLimiter
+    from lxw_cli.mcp_server import mcp
+
+    statuses = []
+    try:
+        async with httpx.AsyncClient(base_url=server) as c:
+            for _ in range(REGISTRATION_RATE_LIMIT + 1):
+                reg = await c.post(
+                    "/register",
+                    json={
+                        "client_name": "flood",
+                        "redirect_uris": ["http://127.0.0.1:9/cb"],
+                        "token_endpoint_auth_method": "none",
+                    },
+                )
+                statuses.append(reg.status_code)
+    finally:
+        # The module-scoped server is shared: don't starve later tests.
+        limiter = mcp.auth._register_limiter
+        fresh = RateLimiter(REGISTRATION_RATE_LIMIT, 600)
+        limiter.__dict__.update(fresh.__dict__)
+    assert statuses[-1] == 429
+
+
+@pytest.mark.asyncio
+async def test_revocation_endpoint_is_advertised(server: str) -> None:
+    async with httpx.AsyncClient(base_url=server) as c:
+        meta = (await c.get("/.well-known/oauth-authorization-server")).json()
+        assert meta.get("revocation_endpoint")

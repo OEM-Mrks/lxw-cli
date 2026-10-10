@@ -207,6 +207,22 @@ async def test_upload_voucher_file_requires_a_source() -> None:
             await c.call_tool("upload_voucher_file", {"identifier": _UUID})
 
 
+def test_upload_file_path_refused_over_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over HTTP file_path would read the server's disk — must be refused."""
+    import lxw_cli.mcp_server as server
+
+    secret = tmp_path / "secret.pdf"
+    secret.write_bytes(b"server-only")
+    monkeypatch.setattr(server, "_in_http_request", lambda: True)
+    with pytest.raises(ValueError, match="file_base64"):
+        server._resolve_upload(str(secret), None, "x.pdf")
+    # base64 keeps working over HTTP.
+    content, name = server._resolve_upload(None, base64.b64encode(b"ok").decode(), "a.pdf")
+    assert content == b"ok" and name == "a.pdf"
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_download_voucher_file_saves_to_path(tmp_path: Path) -> None:
@@ -417,3 +433,82 @@ async def test_input_error_stays_unannotated(status_page) -> None:
             await c.call_tool("profile", {})
 
     assert "status.lexware.de" not in str(excinfo.value)
+
+
+def test_upload_size_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import lxw_cli.mcp_server as server
+
+    monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 10)
+    with pytest.raises(ValueError, match="zu groß"):
+        server._resolve_upload(None, base64.b64encode(b"x" * 30).decode(), "a.pdf")
+    big = tmp_path / "big.pdf"
+    big.write_bytes(b"x" * 30)
+    with pytest.raises(ValueError, match="zu groß"):
+        server._resolve_upload(str(big), None, None)
+    small = tmp_path / "small.pdf"
+    small.write_bytes(b"ok")
+    assert server._resolve_upload(str(small), None, None) == (b"ok", "small.pdf")
+
+
+async def _echo_body_app(scope, receive, send) -> None:
+    body = b""
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return
+        body += message.get("body", b"")
+        if not message.get("more_body"):
+            break
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": str(len(body)).encode()})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunked", [False, True])
+async def test_body_size_limit(chunked: bool) -> None:
+    from lxw_cli.mcp_server import BodySizeLimit
+
+    app = BodySizeLimit(_echo_body_app, max_bytes=10)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        ok = await c.post("/", content=b"12345")
+        assert ok.status_code == 200 and ok.text == "5"
+
+        if chunked:
+            async def gen():
+                for _ in range(5):
+                    yield b"xxxxx"
+
+            resp = await c.post("/", content=gen())
+        else:
+            resp = await c.post("/", content=b"x" * 25)
+        assert resp.status_code == 413
+
+
+def test_stdio_upload_only_receipt_files_outside_hidden_dirs(tmp_path: Path) -> None:
+    import lxw_cli.mcp_server as server
+
+    key = tmp_path / "id_rsa"
+    key.write_bytes(b"secret")
+    with pytest.raises(ValueError, match="Nur Belegdateien"):
+        server._resolve_upload(str(key), None, None)
+    hidden = tmp_path / ".ssh"
+    hidden.mkdir()
+    (hidden / "x.pdf").write_bytes(b"%PDF")
+    with pytest.raises(ValueError, match="versteckten"):
+        server._resolve_upload(str(hidden / "x.pdf"), None, None)
+
+
+def test_stdio_download_refuses_hidden_output_dir(tmp_path: Path) -> None:
+    import lxw_cli.mcp_server as server
+
+    with pytest.raises(ValueError, match="versteckten"):
+        server._file_result(b"x", str(tmp_path / ".config" / "autostart"), "a.pdf")
+
+
+def test_stdio_download_neutralizes_foreign_extension(tmp_path: Path) -> None:
+    import lxw_cli.mcp_server as server
+
+    saved = server._file_result(b"x", str(tmp_path), "evil.desktop")
+    assert saved.endswith("evil.desktop.bin")
+    assert server._file_result(b"x", str(tmp_path), "beleg.PDF").endswith("beleg.PDF")

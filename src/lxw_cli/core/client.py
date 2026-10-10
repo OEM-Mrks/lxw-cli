@@ -18,7 +18,7 @@ from tenacity import (
 
 from lxw_cli import __version__
 from lxw_cli.config import Config
-from lxw_cli.core.errors import LexwareAPIError, RateLimitError
+from lxw_cli.core.errors import LexwareAPIError, LexwareError, RateLimitError
 
 RATE_LIMIT_PER_SECOND = 2
 MIN_INTERVAL = 1.0 / RATE_LIMIT_PER_SECOND
@@ -32,6 +32,19 @@ PAGE_SIZE_MAX = 250
 MAX_RETRY_AFTER = 60.0
 
 _BACKOFF = wait_exponential(multiplier=1, min=1, max=30)
+
+# Every API path is "/v1/<segment>/…". Segments carry resource names and ids
+# (UUIDs) — often straight from user/LLM input such as an invoice id. Only
+# unreserved characters are allowed, so an id like "x/../contacts" or
+# "x?foo=bar" can never reach another endpoint or smuggle query parameters
+# (those go through `params`).
+_PATH_RE = re.compile(r"^/v1(?:/[A-Za-z0-9_~.-]+)+$")
+
+
+def _check_path(path: str) -> None:
+    segments = path.split("/")
+    if not _PATH_RE.match(path) or any(seg in (".", "..") for seg in segments):
+        raise LexwareError(f"Ungültige Kennung im API-Pfad: {path!r}")
 
 
 def _wait_for_retry(retry_state: RetryCallState) -> float:
@@ -102,6 +115,7 @@ class LexwareClient:
         files: Any = None,
         accept: str = "application/json",
     ) -> httpx.Response:
+        _check_path(path)
         self._throttle()
         headers = {"Accept": accept} if accept != "application/json" else None
         cleaned_params = (

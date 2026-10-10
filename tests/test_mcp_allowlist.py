@@ -92,11 +92,28 @@ def test_enforce_hot_reloads_allowlist_file(monkeypatch, tmp_path) -> None:
     assert gate.evaluate_profile(PROFILE_KNOWN, "k").allowed
 
 
-def test_enforce_no_org_fails_closed_but_fail_open_overrides(monkeypatch, tmp_path) -> None:
+def test_enforce_no_org_blocks_even_with_fail_open(monkeypatch, tmp_path) -> None:
+    """A profile without organization is not 'unreachable' — no fail-open."""
     gate = _gate(monkeypatch, tmp_path, "enforce")
     assert not gate.evaluate_profile({"companyName": "NoOrg"}, "k").allowed
     gate2 = _gate(monkeypatch, tmp_path, "enforce", LXW_MCP_ALLOWLIST_FAIL_OPEN="1")
-    assert gate2.evaluate_profile({"companyName": "NoOrg"}, "k").allowed
+    assert not gate2.evaluate_profile({"companyName": "NoOrg"}, "k").allowed
+
+
+@respx.mock
+def test_fail_open_only_when_lexware_unreachable(monkeypatch, tmp_path) -> None:
+    route = respx.get(f"{LEXWARE_API}/v1/profile")
+    gate = _gate(
+        monkeypatch, tmp_path, "enforce",
+        LXW_MCP_ALLOWLIST=KNOWN, LXW_MCP_ALLOWLIST_FAIL_OPEN="1",
+    )
+    route.mock(return_value=httpx.Response(503))
+    assert asyncio.run(gate.evaluate("key-a")).allowed
+    route.mock(side_effect=httpx.ConnectError("down"))
+    assert asyncio.run(gate.evaluate("key-b")).allowed
+    # A rejected key is an answer, not an outage: stays blocked.
+    route.mock(return_value=httpx.Response(401))
+    assert not asyncio.run(gate.evaluate("key-c")).allowed
 
 
 def test_accepts_json_array_and_object_files(monkeypatch, tmp_path) -> None:

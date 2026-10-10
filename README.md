@@ -469,6 +469,11 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 - **Funktionswunsch melden**: `request_feature` erstellt einen **unverbindlichen** Feature-Wunsch als fertigen Text (`subject`/`body`) samt Anbieter-Adresse (`to` = david@oemedia.de). Der Server **versendet nichts** — der Nutzer kopiert den Text und schickt ihn selbst per E-Mail. Dies ist ein Endkundenprodukt: der Assistent baut keine Funktionen selbst, sondern bietet bei fehlenden Funktionen nur diesen Weg an.
 
 Alle document-Tools (`get_*`, `download_*_pdf`) akzeptieren UUID **oder** Belegnummer (z.B. `FB2600682`) — **Ausnahme Mahnungen**: die sind nur per id ansprechbar (s.o.). PDFs landen in `~/Downloads/lexware/`.
+Zum Schutz vor Prompt-Injection gilt lokal: `output_dir` darf nicht in einem
+versteckten Verzeichnis liegen (z.B. `~/.config`), Uploads per `file_path` sind
+auf Belegdateien (pdf, jpg, jpeg, png, xml) außerhalb versteckter Verzeichnisse
+beschränkt, und heruntergeladene Dateien mit anderer Endung bekommen `.bin`
+angehängt.
 
 Die `list_*`-Tools bieten dieselben Optionen wie die CLI:
 
@@ -522,7 +527,7 @@ mitbringt**. Der Server speichert keine Keys — er ist ein zustandsloser Proxy.
 
 ```bash
 LXW_MCP_PUBLIC_URL=https://mcp.example.com \
-LXW_MCP_SECRET='ein-langes-zufaelliges-secret' \
+LXW_MCP_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
 lxw-mcp-http    # lauscht auf 127.0.0.1:8788 (LXW_MCP_HOST/LXW_MCP_PORT)
 ```
 
@@ -542,19 +547,39 @@ Zwei Wege, den eigenen Key mitzubringen:
    stellt ein Zugriffstoken aus, in dem der Key **verschlüsselt eingebettet**
    ist (Fernet, `LXW_MCP_SECRET`). Das Token liegt beim Client auf dem Gerät
    des Nutzers; der Server entschlüsselt es nur pro Request und persistiert
-   ausschließlich die OAuth-Client-Registrierungen (`LXW_MCP_DATA_DIR`,
-   Standard `~/.config/lexware/mcp/`).
+   ausschließlich die OAuth-Client-Registrierungen und eine Sperrliste
+   widerrufener Tokens (`LXW_MCP_DATA_DIR`, Standard `~/.config/lexware/mcp/`).
 
 Hinweise für den Betrieb:
 
 - `LXW_MCP_SECRET` **fest setzen** — ohne festes Secret werden alle Tokens
   bei jedem Neustart ungültig. Rotieren des Secrets invalidiert bewusst alle
-  ausgestellten Tokens.
+  ausgestellten Tokens. Das Secret muss ein Fernet-Key oder mindestens
+  32 Zeichen lang sein, sonst startet der Server nicht.
+- Refresh-Tokens sind einmalig gültig (Rotation). Wird ein bereits benutzter
+  Refresh-Token erneut vorgelegt, wird die gesamte Verbindung gesperrt.
+  Tokens lassen sich über `/revoke` (RFC 7009) widerrufen; die Sperrliste
+  liegt in `revoked.json` und überlebt Neustarts.
+- Grenzen: Client-Registrierung max. 10 pro IP in 10 Minuten und max. 2000
+  gespeicherte Clients (älteste fallen raus); Request-Body max. 16 MB,
+  Datei-Upload max. 10 MB. Der Reverse-Proxy muss `X-Forwarded-For` setzen;
+  läuft er nicht auf demselben Host, seine Adresse in `FORWARDED_ALLOW_IPS`
+  eintragen (uvicorn) — sonst zählt das Registrierungs-Limit alle Clients
+  als eine IP.
 - Vor den Server gehört ein HTTPS-Reverse-Proxy (Caddy, nginx, Cloudflare
   Tunnel, `tailscale serve`, …); `LXW_MCP_PUBLIC_URL` ist die von außen
   sichtbare Basis-URL (sie steht in den OAuth-Metadaten).
 - PDF-Downloads liefern über HTTP das PDF als Binärinhalt zurück (statt eines
   Pfads auf der Server-Platte wie im stdio-Modus).
+- OAuth-Clients dürfen sich nur mit Redirect-URIs auf vertrauenswürdige Ziele
+  registrieren: Loopback (`127.0.0.1`, `localhost`, `[::1]`, beliebiger Port),
+  `https://` auf `claude.ai`, `claude.com`, `chatgpt.com`, `chat.openai.com`,
+  `vscode.dev`, sowie die Schemes `cursor:`, `vscode:`, `vscode-insiders:`.
+  Weitere Ziele per `LXW_MCP_REDIRECT_ALLOW` (kommagetrennt; Host = https auf
+  diesem Host, `schema:` = eigenes Schema). Registrierungen mit anderen Zielen
+  werden abgelehnt, bereits gespeicherte ignoriert.
+- Datei-Uploads akzeptieren über HTTP nur `file_base64`; `file_path` (eine
+  Datei auf der Server-Platte) wird abgelehnt.
 - Der Server prüft im Hintergrund alle 10 Minuten den Lexware-Betriebsstatus
   (`LXW_MCP_STATUS_REFRESH`, Sekunden; `0` schaltet das ab). Das hält den
   Zwischenspeicher warm, damit der Fehlerpfad sofort antwortet, und schreibt
@@ -618,8 +643,10 @@ Freischalten (beide Quellen werden gemischt):
 
 Weitere Schalter: `LXW_MCP_ALLOWLIST_CONTACT` (Adresse in der Ablehn-Meldung),
 `LXW_MCP_ALLOWLIST_TTL` (Sekunden Cache für Key→Org-Auflösung, Standard 600),
-`LXW_MCP_ALLOWLIST_FAIL_OPEN=1` (bei nicht erreichbarer Lexware-API durchlassen
-statt sperren; Standard ist im `enforce`-Modus fail-closed).
+`LXW_MCP_ALLOWLIST_FAIL_OPEN=1` (bei nicht erreichbarer Lexware-API —
+Netzwerkfehler, HTTP 5xx/429 — durchlassen statt sperren; Standard ist im
+`enforce`-Modus fail-closed). Ein von Lexware abgelehnter Key oder ein Profil
+ohne Organisation bleibt auch mit Fail-Open gesperrt.
 
 Empfohlener Rollout: erst `log` fahren, `pending.json` sichten, bekannte Orgs in
 `allowlist.json` übernehmen, dann auf `enforce` umstellen.

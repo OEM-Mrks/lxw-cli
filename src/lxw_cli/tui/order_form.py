@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.markup import escape
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Static, TextArea
 
@@ -139,7 +141,7 @@ class OrderCreateScreen(ModalScreen[dict[str, Any] | None]):
             if 0 <= event.option_index < len(self._contacts):
                 self._contact = self._contacts[event.option_index]
                 name = contact_row(self._contact)[0] or self._contact.get("id", "")
-                self.query_one("#customer-chosen", Static).update(f"Kunde: {name}")
+                self.query_one("#customer-chosen", Static).update(f"Kunde: {escape(str(name))}")
                 self.query_one("#article-search", Input).focus()
         elif event.option_list.id == "article-results":
             if 0 <= event.option_index < len(self._articles):
@@ -187,7 +189,7 @@ class OrderCreateScreen(ModalScreen[dict[str, Any] | None]):
         article_input.value = ""
         article_input.focus()
         lines = [format_position(a, q, p) for a, q, p in self._positions]
-        self.query_one("#positions", Static).update("\n".join(lines))
+        self.query_one("#positions", Static).update(escape("\n".join(lines)))
         self._status("")
 
     def _submit(self) -> None:
@@ -200,7 +202,8 @@ class OrderCreateScreen(ModalScreen[dict[str, Any] | None]):
         self._create_order()
 
     def _status(self, message: str) -> None:
-        self.query_one("#order-status", Static).update(message)
+        # Messages often carry API error text — never interpret it as markup.
+        self.query_one("#order-status", Static).update(escape(message))
 
     # -- workers ----------------------------------------------------------------
 
@@ -225,7 +228,7 @@ class OrderCreateScreen(ModalScreen[dict[str, Any] | None]):
         self._contacts = found.items
         results.clear_options()
         results.add_options(
-            [contact_row(c)[0] or c.get("id", "?") for c in self._contacts]
+            [Text(contact_row(c)[0] or c.get("id", "?")) for c in self._contacts]
             or ["— keine Treffer —"]
         )
         if self._contacts:
@@ -251,7 +254,7 @@ class OrderCreateScreen(ModalScreen[dict[str, Any] | None]):
         self._articles = found.items
         results.clear_options()
         results.add_options(
-            [format_position(a, 1).removeprefix("1 × ") for a in self._articles]
+            [Text(format_position(a, 1).removeprefix("1 × ")) for a in self._articles]
             or ["— keine Treffer —"]
         )
         if self._articles:

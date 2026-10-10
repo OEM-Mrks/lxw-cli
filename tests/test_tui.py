@@ -620,3 +620,23 @@ async def test_status_line_stays_visible_with_many_rows(config) -> None:
             assert "250 von 250" in app._last_status
     finally:
         client.close()
+
+
+@respx.mock
+async def test_tui_does_not_interpret_markup_in_api_errors(config) -> None:
+    respx.get(_PROFILE).mock(
+        return_value=httpx.Response(200, json={"companyName": "Acme GmbH"})
+    )
+    respx.get(_VOUCHERLIST).mock(
+        return_value=httpx.Response(500, json={"message": "[@click=app.quit]boom[/]"})
+    )
+    client = LexwareClient(config)
+    app = LexwareTUI(client)
+    try:
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Escaped: rendered literally, not as a clickable action.
+            assert "\\[@click=app.quit]" in app._last_status
+    finally:
+        client.close()
