@@ -488,6 +488,8 @@ def list_invoices(
     """List invoices (salesinvoice/invoice/downpaymentinvoice).
 
     voucher_status: comma-separated, e.g. 'open,paid' (default: all non-overdue).
+        'overdue' (überfällig) may be combined, e.g. 'open,overdue' —
+        it is queried separately and merged.
     voucher_number: filter by exact invoice number.
     contact_id: filter by customer UUID.
     include_archived: archived invoices are excluded by default; set True to
@@ -583,9 +585,12 @@ def list_vouchers(
     """List vouchers (all types — invoices, credit notes, purchase invoices etc.).
 
     voucher_type: comma-separated, e.g. 'salesinvoice,purchaseinvoice'.
-    Default: all sales/purchase types. Archived vouchers are excluded by default;
-    set include_archived=True to include them. Set limit=0 to fetch all
-    (paginates internally).
+    Default: all sales/purchase types.
+    voucher_status: comma-separated, e.g. 'open,paid' (default: all non-overdue).
+        'overdue' (überfällig) may be combined, e.g. 'open,overdue' —
+        it is queried separately and merged.
+    Archived vouchers are excluded by default; set include_archived=True to
+    include them. Set limit=0 to fetch all (paginates internally).
     """
     return services.list_vouchers(
         _client_get(),

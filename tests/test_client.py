@@ -239,6 +239,23 @@ def test_non_length_details_still_surface(client: LexwareClient) -> None:
     assert "must not be null" in str(excinfo.value)
 
 
+@respx.mock
+def test_overdue_combination_error_is_translated(client: LexwareClient) -> None:
+    respx.get("https://api.lexware.io/v1/voucherlist").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "message": "voucherStatus filter 'overdue' cannot be used in "
+                "combination with other states"
+            },
+        )
+    )
+    with pytest.raises(LexwareAPIError) as excinfo:
+        client.get("/v1/voucherlist")
+    assert excinfo.value.status_code == 400
+    assert "überfällig" in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "path",
     [

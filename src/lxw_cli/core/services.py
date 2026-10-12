@@ -229,23 +229,71 @@ def _list_voucherlist(
     limit: int = 25,
     fetch_all: bool = False,
 ) -> ListResult:
-    """Shared voucherlist query for invoices/vouchers/quotations/delivery-notes."""
-    meta: dict[str, Any] = {}
-    items = list(
-        client.paginate(
-            "/v1/voucherlist",
-            params={
-                "voucherType": voucher_type,
-                "voucherStatus": status or DEFAULT_VOUCHER_STATUSES,
-                "voucherNumber": number,
-                "contactId": contact_id,
-                "archived": archived_param(include_archived),
-            },
-            max_items=resolve_max_items(limit, fetch_all),
-            meta=meta,
+    """Shared voucherlist query for invoices/vouchers/quotations/delivery-notes.
+
+    Lexware rejects 'overdue' combined with other states (HTTP 400). A combined
+    filter such as 'open,overdue' is therefore split into two queries — first
+    'overdue', then the remaining states — and merged without duplicates.
+    """
+    max_items = resolve_max_items(limit, fetch_all)
+    params: dict[str, Any] = {
+        "voucherType": voucher_type,
+        "voucherNumber": number,
+        "contactId": contact_id,
+        "archived": archived_param(include_archived),
+    }
+    groups = split_voucher_status(status or DEFAULT_VOUCHER_STATUSES)
+    if len(groups) == 1:
+        meta: dict[str, Any] = {}
+        items = list(
+            client.paginate(
+                "/v1/voucherlist",
+                params={**params, "voucherStatus": groups[0]},
+                max_items=max_items,
+                meta=meta,
+            )
         )
-    )
-    return ListResult(items=items, total=meta.get("total"))
+        return ListResult(items=items, total=meta.get("total"))
+
+    merged: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    complete = True
+    for group in groups:
+        rows = list(
+            client.paginate(
+                "/v1/voucherlist",
+                params={**params, "voucherStatus": group},
+                max_items=max_items,
+            )
+        )
+        if max_items is not None and len(rows) >= max_items:
+            complete = False
+        for row in rows:
+            key = row.get("id")
+            if key is not None and key in seen:
+                continue
+            if key is not None:
+                seen.add(key)
+            merged.append(row)
+    if max_items is not None and len(merged) > max_items:
+        merged = merged[:max_items]
+        complete = False
+    # The real size of the merged set is only known when nothing was cut off.
+    return ListResult(items=merged, total=len(merged) if complete else None)
+
+
+def split_voucher_status(status: str) -> list[str]:
+    """Split a voucherStatus filter so 'overdue' is never combined with others.
+
+    'overdue' is a derived state the API only accepts on its own. Returns one
+    group for a plain filter, or ['overdue', '<rest>'] when it was combined.
+    """
+    states = [s.strip() for s in status.split(",") if s.strip()]
+    overdue = [s for s in states if s.casefold() == "overdue"]
+    if not overdue or len(states) == 1:
+        return [",".join(states) or status]
+    rest = [s for s in states if s.casefold() != "overdue"]
+    return ["overdue", ",".join(dict.fromkeys(rest))] if rest else ["overdue"]
 
 
 # -- Invoices ---------------------------------------------------------------

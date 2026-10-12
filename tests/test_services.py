@@ -680,3 +680,52 @@ def test_update_contact_ignores_unchanged_archived(client: LexwareClient) -> Non
     body = json.loads(put.calls.last.request.content)
     assert body["note"] == "neu"
     assert body["archived"] is False
+
+
+def test_split_voucher_status() -> None:
+    assert services.split_voucher_status("open,paid") == ["open,paid"]
+    assert services.split_voucher_status("overdue") == ["overdue"]
+    assert services.split_voucher_status("open, overdue") == ["overdue", "open"]
+    assert services.split_voucher_status("Overdue,open,paid,open") == [
+        "overdue",
+        "open,paid",
+    ]
+
+
+def _voucherlist_by_status(request: httpx.Request) -> httpx.Response:
+    status = request.url.params["voucherStatus"]
+    if status == "overdue":
+        rows = [{"id": "o1"}, {"id": "o2"}]
+    else:
+        assert "overdue" not in status
+        rows = [{"id": "o1"}, {"id": "a"}, {"id": "b"}]  # open includes o1
+    return httpx.Response(
+        200, json={"content": rows, "last": True, "totalElements": len(rows)}
+    )
+
+
+@respx.mock
+def test_overdue_combined_is_split_and_merged(client: LexwareClient) -> None:
+    route = respx.get(_VOUCHERLIST).mock(side_effect=_voucherlist_by_status)
+    result = services.list_invoices(client, status="open,overdue")
+    statuses = [c.request.url.params["voucherStatus"] for c in route.calls]
+    assert statuses == ["overdue", "open"]
+    assert [r["id"] for r in result.items] == ["o1", "o2", "a", "b"]
+    assert result.total == 4
+
+
+@respx.mock
+def test_overdue_split_respects_limit(client: LexwareClient) -> None:
+    respx.get(_VOUCHERLIST).mock(side_effect=_voucherlist_by_status)
+    result = services.list_vouchers(client, status="overdue,open", limit=3)
+    assert [r["id"] for r in result.items] == ["o1", "o2", "a"]
+    assert result.total is None  # cut off, real size unknown
+
+
+@respx.mock
+def test_overdue_alone_is_single_query(client: LexwareClient) -> None:
+    route = respx.get(_VOUCHERLIST).mock(side_effect=_voucherlist_by_status)
+    result = services.list_invoices(client, status="overdue")
+    assert route.call_count == 1
+    assert result.total == 2
+
