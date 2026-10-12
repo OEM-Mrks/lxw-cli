@@ -256,8 +256,26 @@ def _extract_message(response: httpx.Response) -> str:
             return detail
         for key in ("message", "error_description", "error", "title"):
             if key in body and body[key]:
-                return str(body[key])
+                return _translate_known_message(str(body[key]))
     return response.text or response.reason_phrase or "API error"
+
+
+# Known Lexware error texts that are hard to understand for end users, with a
+# plain German replacement. Matched case-insensitively against the message.
+_KNOWN_MESSAGES = (
+    (
+        re.compile(r"voucherStatus filter 'overdue' cannot be used in combination", re.I),
+        "Der Status „überfällig“ kann bei Lexware nicht zusammen mit anderen "
+        "Status abgefragt werden. Bitte überfällige Belege separat abfragen.",
+    ),
+)
+
+
+def _translate_known_message(message: str) -> str:
+    for pattern, german in _KNOWN_MESSAGES:
+        if pattern.search(message):
+            return german
+    return message
 
 
 # Friendly German labels for the technical field paths Lexware returns in
