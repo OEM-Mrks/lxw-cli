@@ -268,6 +268,13 @@ _KNOWN_MESSAGES = (
         "Der Status „überfällig“ kann bei Lexware nicht zusammen mit anderen "
         "Status abgefragt werden. Bitte überfällige Belege separat abfragen.",
     ),
+    (
+        # HTTP 409 on a PDF download: "the sales voucher with id … and voucher
+        # type 'Order' is in status 'draft' and therefore cannot be downloaded"
+        re.compile(r"is in status 'draft' and therefore cannot be downloaded", re.I),
+        "Beleg ist ein Entwurf – erst in Lexware abschließen. Entwürfe haben "
+        "noch kein PDF; nach dem Abschließen lässt sich das PDF herunterladen.",
+    ),
 )
 
 

@@ -729,3 +729,81 @@ def test_overdue_alone_is_single_query(client: LexwareClient) -> None:
     assert route.call_count == 1
     assert result.total == 2
 
+
+
+# -- voucher_type check / article lookup by number ---------------------------
+
+
+@respx.mock
+def test_invalid_voucher_type_is_rejected_before_the_api(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    route = respx.get(_VOUCHERLIST).mock(return_value=httpx.Response(400))
+    with pytest.raises(LexwareError) as excinfo:
+        services.list_vouchers(client, voucher_type="purchaseinvoice,voucher")
+    assert not route.called
+    message = str(excinfo.value)
+    assert "'voucher'" in message
+    assert "purchaseinvoice (Eingangsrechnung)" in message
+    assert "any" in message
+
+
+@respx.mock
+def test_valid_voucher_type_is_normalized(client: LexwareClient) -> None:
+    route = respx.get(_VOUCHERLIST).mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    services.list_vouchers(client, voucher_type=" PurchaseInvoice, any,purchaseinvoice")
+    assert route.calls.last.request.url.params["voucherType"] == "purchaseinvoice,any"
+
+
+@respx.mock
+def test_list_order_confirmations_filters_number_and_contact(client: LexwareClient) -> None:
+    route = respx.get(_VOUCHERLIST).mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    services.list_order_confirmations(client, number="AB6246648", contact_id=_UUID)
+    params = route.calls.last.request.url.params
+    assert params["voucherType"] == "orderconfirmation"
+    assert params["voucherNumber"] == "AB6246648"
+    assert params["contactId"] == _UUID
+
+
+@respx.mock
+def test_get_article_by_uuid_skips_lookup(client: LexwareClient) -> None:
+    lookup = respx.get(_ARTICLES).mock(return_value=httpx.Response(500))
+    respx.get(f"{_ARTICLES}/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID})
+    )
+    assert services.get_article(client, _UUID) == {"id": _UUID}
+    assert not lookup.called
+
+
+@respx.mock
+def test_get_article_resolves_article_number(client: LexwareClient) -> None:
+    lookup = respx.get(_ARTICLES, params={"articleNumber": "10042"}).mock(
+        return_value=httpx.Response(
+            200, json={"content": [{"id": _UUID, "articleNumber": "10042"}], "last": True}
+        )
+    )
+    respx.get(f"{_ARTICLES}/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID, "articleNumber": "10042"})
+    )
+    assert services.get_article(client, " 10042 ")["id"] == _UUID
+    assert lookup.called
+
+
+@respx.mock
+def test_get_article_unknown_number(client: LexwareClient) -> None:
+    import pytest
+
+    from lxw_cli.core.errors import LexwareError
+
+    respx.get(_ARTICLES).mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    with pytest.raises(LexwareError) as excinfo:
+        services.get_article(client, "GIBTSNICHT")
+    assert "Kein Artikel mit Artikelnummer 'GIBTSNICHT'" in str(excinfo.value)

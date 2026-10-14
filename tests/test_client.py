@@ -286,3 +286,22 @@ def test_accepts_regular_paths(client: LexwareClient) -> None:
         return_value=httpx.Response(200, json={})
     )
     client.get("/v1/order-confirmations/1a3c79ca-1804-4ab6-a3a5-915cc762b2ce/file")
+
+
+@respx.mock
+def test_draft_pdf_conflict_is_translated(client: LexwareClient) -> None:
+    respx.get("https://api.lexware.io/v1/order-confirmations/x/file").mock(
+        return_value=httpx.Response(
+            409,
+            json={
+                "message": "the sales voucher with id 180736fe-7441-4212-965e-"
+                "294fadc55c25 and voucher type 'Order' is in status 'draft' and "
+                "therefore cannot be downloaded"
+            },
+        )
+    )
+    with pytest.raises(LexwareAPIError) as excinfo:
+        client.get_binary("/v1/order-confirmations/x/file")
+    assert excinfo.value.status_code == 409
+    assert "Entwurf" in str(excinfo.value)
+    assert "erst in Lexware abschließen" in str(excinfo.value)

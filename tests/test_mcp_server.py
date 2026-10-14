@@ -512,3 +512,89 @@ def test_stdio_download_neutralizes_foreign_extension(tmp_path: Path) -> None:
     saved = server._file_result(b"x", str(tmp_path), "evil.desktop")
     assert saved.endswith("evil.desktop.bin")
     assert server._file_result(b"x", str(tmp_path), "beleg.PDF").endswith("beleg.PDF")
+
+
+# -- Parameter robustness (falsch geratene Namen) ----------------------------
+
+_ART_UUID = "1a3c79ca-1804-4ab6-a3a5-915cc762b2ce"
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize("param", ["identifier", "article_id"])
+async def test_get_article_accepts_identifier_and_legacy_alias(param: str) -> None:
+    respx.get("https://api.lexware.io/v1/articles", params={"articleNumber": "10042"}).mock(
+        return_value=httpx.Response(
+            200, json={"content": [{"id": _ART_UUID}], "last": True}
+        )
+    )
+    respx.get(f"https://api.lexware.io/v1/articles/{_ART_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _ART_UUID, "title": "Etikett"})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool("get_article", {param: "10042"})
+    assert result.data["title"] == "Etikett"
+
+
+@pytest.mark.asyncio
+async def test_get_article_without_identifier_explains() -> None:
+    from fastmcp.exceptions import ToolError
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("get_article", {})
+    assert "identifier" in str(excinfo.value)
+    assert "Artikelnummer" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_wrong_parameter_name_gets_german_hint() -> None:
+    from fastmcp.exceptions import ToolError
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("get_invoice", {"invoice_id": "FB2600682"})
+    message = str(excinfo.value)
+    assert "Diesen Parameter gibt es nicht: invoice_id" in message
+    assert "Pflichtparameter fehlt: identifier" in message
+    assert "Erlaubte Parameter: identifier (Pflicht)" in message
+
+
+@pytest.mark.asyncio
+async def test_unknown_list_filter_lists_allowed_parameters() -> None:
+    from fastmcp.exceptions import ToolError
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("list_articles", {"query": "Etikett"})
+    message = str(excinfo.value)
+    assert "Diesen Parameter gibt es nicht: query" in message
+    assert "search" in message
+    assert "Pflichtparameter" not in message
+
+
+@pytest.mark.asyncio
+async def test_invalid_voucher_type_reaches_the_caller_in_german() -> None:
+    from fastmcp.exceptions import ToolError
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool(
+                "list_vouchers", {"voucher_type": "purchaseinvoice,voucher"}
+            )
+    assert "Ungültiger Belegtyp 'voucher'" in str(excinfo.value)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_quotations_accepts_number_and_contact() -> None:
+    route = respx.get("https://api.lexware.io/v1/voucherlist").mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    async with Client(mcp) as c:
+        await c.call_tool(
+            "list_quotations", {"voucher_number": "AG1", "contact_id": _ART_UUID}
+        )
+    params = route.calls.last.request.url.params
+    assert params["voucherNumber"] == "AG1"
+    assert params["contactId"] == _ART_UUID
