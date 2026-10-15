@@ -19,6 +19,7 @@ from lxw_cli.core.constants import (
     DEFAULT_VOUCHER_STATUSES,
     DEFAULT_VOUCHER_TYPES,
     INVOICE_LIKE_TYPES,
+    VOUCHER_TYPE_LABELS,
 )
 from lxw_cli.core.errors import LexwareAPIError, LexwareError
 from lxw_cli.core.limits import validate_article, validate_contact, validate_voucher
@@ -354,7 +355,9 @@ def list_vouchers(
 ) -> ListResult:
     return _list_voucherlist(
         client,
-        voucher_type=voucher_type or DEFAULT_VOUCHER_TYPES,
+        voucher_type=(
+            normalize_voucher_type(voucher_type) if voucher_type else DEFAULT_VOUCHER_TYPES
+        ),
         status=status,
         number=number,
         contact_id=contact_id,
@@ -362,6 +365,26 @@ def list_vouchers(
         limit=limit,
         fetch_all=fetch_all,
     )
+
+
+def normalize_voucher_type(voucher_type: str) -> str:
+    """Check a comma-separated voucherType filter before it reaches Lexware.
+
+    Lexware answers an unknown type (e.g. 'voucher') with a bare HTTP 400.
+    Catch that up front with a German message that lists the valid values —
+    the caller (often an AI) can then correct itself in one step. Returns the
+    filter lower-cased and without duplicates.
+    """
+    types = [t.strip().lower() for t in voucher_type.split(",") if t.strip()]
+    invalid = [t for t in types if t not in VOUCHER_TYPE_LABELS]
+    if not types or invalid:
+        valid = ", ".join(f"{t} ({label})" for t, label in VOUCHER_TYPE_LABELS.items())
+        shown = ", ".join(f"'{t}'" for t in invalid) or f"'{voucher_type}'"
+        raise LexwareError(
+            f"Ungültiger Belegtyp {shown}. Gültige Werte (kommagetrennt "
+            f"kombinierbar): {valid}."
+        )
+    return ",".join(dict.fromkeys(types))
 
 
 def get_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
@@ -461,6 +484,8 @@ def list_quotations(
     client: LexwareClient,
     *,
     status: str | None = None,
+    number: str | None = None,
+    contact_id: str | None = None,
     include_archived: bool = False,
     limit: int = 25,
     fetch_all: bool = False,
@@ -469,6 +494,8 @@ def list_quotations(
         client,
         voucher_type="quotation",
         status=status,
+        number=number,
+        contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
         fetch_all=fetch_all,
@@ -499,6 +526,8 @@ def list_order_confirmations(
     client: LexwareClient,
     *,
     status: str | None = None,
+    number: str | None = None,
+    contact_id: str | None = None,
     include_archived: bool = False,
     limit: int = 25,
     fetch_all: bool = False,
@@ -507,6 +536,8 @@ def list_order_confirmations(
         client,
         voucher_type="orderconfirmation",
         status=status,
+        number=number,
+        contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
         fetch_all=fetch_all,
@@ -600,6 +631,8 @@ def list_delivery_notes(
     client: LexwareClient,
     *,
     status: str | None = None,
+    number: str | None = None,
+    contact_id: str | None = None,
     include_archived: bool = False,
     limit: int = 25,
     fetch_all: bool = False,
@@ -608,6 +641,8 @@ def list_delivery_notes(
         client,
         voucher_type="deliverynote",
         status=status,
+        number=number,
+        contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
         fetch_all=fetch_all,
@@ -1131,8 +1166,36 @@ def list_articles(
     return ListResult(items=items, total=meta.get("total"))
 
 
-def get_article(client: LexwareClient, article_id: str) -> dict[str, Any]:
-    return client.get(f"/v1/articles/{article_id}")
+def resolve_article_id(client: LexwareClient, identifier: str) -> str:
+    """Resolve an article identifier (UUID or article number) to its UUID.
+
+    Mirrors :func:`resolve_voucher_id`: a UUID is returned unchanged, anything
+    else is looked up as an exact article number.
+    """
+    identifier = identifier.strip()
+    if looks_like_uuid(identifier):
+        return identifier
+    matches = list(
+        client.paginate(
+            "/v1/articles", params={"articleNumber": identifier}, max_items=2
+        )
+    )
+    if not matches:
+        raise LexwareError(
+            f"Kein Artikel mit Artikelnummer '{identifier}' gefunden. Für eine "
+            "Suche nach Bezeichnung die Artikelliste mit Suchbegriff verwenden."
+        )
+    if len(matches) > 1:
+        raise LexwareError(
+            f"Mehrere Artikel mit Artikelnummer '{identifier}' gefunden — "
+            "bitte die ID direkt angeben."
+        )
+    return matches[0]["id"]
+
+
+def get_article(client: LexwareClient, identifier: str) -> dict[str, Any]:
+    """Article details by UUID or article number."""
+    return client.get(f"/v1/articles/{resolve_article_id(client, identifier)}")
 
 
 def create_article(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:

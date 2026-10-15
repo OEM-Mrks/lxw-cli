@@ -116,6 +116,92 @@ class StatusHintMiddleware(Middleware):
 
 mcp.add_middleware(StatusHintMiddleware())
 
+
+def _validation_errors(exc: BaseException) -> list[dict[str, Any]] | None:
+    """The pydantic error list behind a rejected tool call, if it is one.
+
+    Newer FastMCP wraps pydantic's error in its own ValidationError
+    (``__cause__``); older versions raise the pydantic error directly.
+    """
+    from pydantic import ValidationError as PydanticValidationError
+
+    for candidate in (exc, exc.__cause__):
+        if isinstance(candidate, PydanticValidationError):
+            return candidate.errors(include_url=False)
+    return None
+
+
+class ArgumentHintMiddleware(Middleware):
+    """Übersetzt falsch geratene Parameternamen in eine klare Ansage.
+
+    KI-Clients raten Parameternamen gern (``invoice_id`` statt
+    ``identifier``). FastMCP lehnt das mit einem technischen
+    Validierungsfehler ab. Wir nennen stattdessen auf Deutsch, welcher Name
+    unbekannt ist, welcher fehlt und welche Parameter das Tool wirklich hat —
+    dann klappt der zweite Versuch sicher.
+    """
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        try:
+            return await call_next(context)
+        except Exception as exc:
+            errors = _validation_errors(exc)
+            message: str | None = None
+            if errors:
+                try:
+                    message = await _argument_hint(
+                        str(getattr(context.message, "name", "") or ""), errors
+                    )
+                except Exception:  # noqa: BLE001 — im Zweifel den Originalfehler zeigen
+                    message = None
+            if not message:
+                raise
+            raise ToolError(message) from exc
+
+
+async def _argument_hint(tool_name: str, errors: list[dict[str, Any]]) -> str:
+    unknown: list[str] = []
+    missing: list[str] = []
+    wrong: list[str] = []
+    for err in errors:
+        loc = err.get("loc") or ()
+        field = str(loc[-1]) if loc else "?"
+        kind = err.get("type", "")
+        if kind == "unexpected_keyword_argument":
+            unknown.append(field)
+        elif kind in ("missing_argument", "missing"):
+            missing.append(field)
+        else:
+            wrong.append(f"{field} ({err.get('msg', 'ungültiger Wert')})")
+
+    parts = [f"Aufruf von {tool_name} mit falschen Parametern."]
+    if unknown:
+        parts.append("Diesen Parameter gibt es nicht: " + ", ".join(unknown) + ".")
+    if missing:
+        parts.append("Pflichtparameter fehlt: " + ", ".join(missing) + ".")
+    if wrong:
+        parts.append("Ungültiger Wert: " + "; ".join(wrong) + ".")
+
+    tool = await mcp.get_tool(tool_name)
+    schema = getattr(tool, "parameters", None) or {}
+    properties = schema.get("properties") or {}
+    if properties:
+        required = set(schema.get("required") or ())
+        allowed = ", ".join(
+            f"{name} (Pflicht)" if name in required else name for name in properties
+        )
+        parts.append(f"Erlaubte Parameter: {allowed}.")
+    if unknown or missing:
+        parts.append("Bitte genau diese Namen verwenden und erneut aufrufen.")
+    else:
+        parts.append("Bitte den Wert korrigieren und erneut aufrufen.")
+    return " ".join(parts)
+
+
+# Registered after StatusHintMiddleware, so it runs inside it: the status
+# hint only ever sees the (already translated) ToolError and leaves it alone.
+mcp.add_middleware(ArgumentHintMiddleware())
+
 _client: LexwareClient | None = None
 
 
@@ -487,6 +573,8 @@ def list_invoices(
 ) -> list[dict[str, Any]]:
     """List invoices (salesinvoice/invoice/downpaymentinvoice).
 
+    Parameters are exactly: limit, voucher_status, voucher_number, contact_id,
+    include_archived (there is no `status`, `number`, `customer` or `query`).
     voucher_status: comma-separated, e.g. 'open,paid' (default: all non-overdue).
         'overdue' (überfällig) may be combined, e.g. 'open,overdue' —
         it is queried separately and merged.
@@ -508,7 +596,11 @@ def list_invoices(
 
 @mcp.tool
 def get_invoice(identifier: str) -> dict[str, Any]:
-    """Get invoice details by UUID or invoice number (e.g. 'FB2600682')."""
+    """Get invoice details by UUID or invoice number (e.g. 'FB2600682').
+
+    The only parameter is `identifier` (invoice number or id) — there is no
+    `invoice_id`, `id` or `number` parameter.
+    """
     return services.get_invoice(_client_get(), identifier)
 
 
@@ -585,7 +677,10 @@ def list_vouchers(
     """List vouchers (all types — invoices, credit notes, purchase invoices etc.).
 
     voucher_type: comma-separated, e.g. 'salesinvoice,purchaseinvoice'.
-    Default: all sales/purchase types.
+        Valid values only: salesinvoice, salescreditnote, purchaseinvoice,
+        purchasecreditnote, invoice, downpaymentinvoice, creditnote,
+        orderconfirmation, quotation, deliverynote, any ('voucher' is NOT a
+        type). Default: all sales/purchase types.
     voucher_status: comma-separated, e.g. 'open,paid' (default: all non-overdue).
         'overdue' (überfällig) may be combined, e.g. 'open,overdue' —
         it is queried separately and merged.
@@ -605,7 +700,11 @@ def list_vouchers(
 
 @mcp.tool
 def get_voucher(identifier: str) -> dict[str, Any]:
-    """Get a voucher's details by UUID or voucher number. Searches all voucher types."""
+    """Get a voucher's details by UUID or voucher number. Searches all voucher types.
+
+    The only parameter is `identifier` (voucher number or id) — there is no
+    `voucher_id`, `id` or `number` parameter.
+    """
     return services.get_voucher(_client_get(), identifier)
 
 
@@ -634,6 +733,8 @@ def list_articles(
 ) -> list[dict[str, Any]]:
     """List or search articles (products and services).
 
+    Parameters are exactly: limit, search, article_type, article_number, gtin
+    (to search by name use `search` — there is no `name`, `query` or `title`).
     search: free-text, case-insensitive substring match over the article's
         title, description and article number — use this to find an article by
         name/Bezeichnung or a partial number (the API itself only filters by
@@ -653,25 +754,45 @@ def list_articles(
 
 
 @mcp.tool
-def get_article(article_id: str) -> dict[str, Any]:
-    """Get an article's details by UUID."""
-    return services.get_article(_client_get(), article_id)
+def get_article(
+    identifier: str | None = None, article_id: str | None = None
+) -> dict[str, Any]:
+    """Get an article's details by article number or UUID.
+
+    Pass `identifier`: the article number (e.g. '10042') or the article id —
+    same convention as the document tools. `article_id` is the older name of
+    the same parameter and still accepted. To find an article by its name,
+    use the article list with `search` instead.
+    """
+    value = (identifier or article_id or "").strip()
+    if not value:
+        raise ToolError(
+            "Bitte `identifier` angeben: die Artikelnummer oder die ID des Artikels."
+        )
+    return services.get_article(_client_get(), value)
 
 
 @mcp.tool
 def list_quotations(
     limit: int = 25,
     voucher_status: str | None = None,
+    voucher_number: str | None = None,
+    contact_id: str | None = None,
     include_archived: bool = False,
 ) -> list[dict[str, Any]]:
-    """List quotations. voucher_status: comma-separated filter.
+    """List quotations (Angebote).
 
+    voucher_status: comma-separated filter, e.g. 'open,accepted'.
+    voucher_number: filter by exact quotation number.
+    contact_id: filter by customer UUID.
     Archived quotations are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all quotations (paginates internally).
     """
     return services.list_quotations(
         _client_get(),
         status=voucher_status,
+        number=voucher_number,
+        contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
     ).items
@@ -679,7 +800,11 @@ def list_quotations(
 
 @mcp.tool
 def get_quotation(identifier: str) -> dict[str, Any]:
-    """Get a quotation's details by UUID or quotation number (e.g. 'AG5241415')."""
+    """Get a quotation's details by UUID or quotation number (e.g. 'AG5241415').
+
+    The only parameter is `identifier` (quotation number or id) — there is no
+    `quotation_id`, `id` or `number` parameter.
+    """
     return services.get_quotation(_client_get(), identifier)
 
 
@@ -697,16 +822,23 @@ def download_quotation_pdf(identifier: str, output_dir: str | None = None) -> st
 def list_order_confirmations(
     limit: int = 25,
     voucher_status: str | None = None,
+    voucher_number: str | None = None,
+    contact_id: str | None = None,
     include_archived: bool = False,
 ) -> list[dict[str, Any]]:
-    """List order confirmations (Aufträge). voucher_status: comma-separated filter.
+    """List order confirmations (Aufträge).
 
+    voucher_status: comma-separated filter, e.g. 'draft,open'.
+    voucher_number: filter by exact order number (e.g. 'AB6246648').
+    contact_id: filter by customer UUID.
     Archived orders are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all (paginates internally).
     """
     return services.list_order_confirmations(
         _client_get(),
         status=voucher_status,
+        number=voucher_number,
+        contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
     ).items
@@ -714,7 +846,11 @@ def list_order_confirmations(
 
 @mcp.tool
 def get_order_confirmation(identifier: str) -> dict[str, Any]:
-    """Get an order confirmation's details by UUID or order number."""
+    """Get an order confirmation's details by UUID or order number (e.g. 'AB6246648').
+
+    The only parameter is `identifier` (order number or id) — there is no
+    `order_id`, `id` or `number` parameter.
+    """
     return services.get_order_confirmation(_client_get(), identifier)
 
 
@@ -722,7 +858,11 @@ def get_order_confirmation(identifier: str) -> dict[str, Any]:
 def download_order_confirmation_pdf(
     identifier: str, output_dir: str | None = None
 ) -> str | File:
-    """Download an order confirmation PDF. Returns the saved file path."""
+    """Download an order confirmation PDF by order number or id (`identifier`).
+
+    stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
+    Drafts have no PDF yet — they must be finalized in Lexware first.
+    """
     data = services.download_order_confirmation_pdf(_client_get(), identifier)
     return _pdf_result(data, output_dir, f"order-{identifier}.pdf")
 
@@ -731,16 +871,23 @@ def download_order_confirmation_pdf(
 def list_delivery_notes(
     limit: int = 25,
     voucher_status: str | None = None,
+    voucher_number: str | None = None,
+    contact_id: str | None = None,
     include_archived: bool = False,
 ) -> list[dict[str, Any]]:
-    """List delivery notes.
+    """List delivery notes (Lieferscheine).
 
+    voucher_status: comma-separated filter.
+    voucher_number: filter by exact delivery note number.
+    contact_id: filter by customer UUID.
     Archived delivery notes are excluded by default; set include_archived=True
     to include them. Set limit=0 to fetch all (paginates internally).
     """
     return services.list_delivery_notes(
         _client_get(),
         status=voucher_status,
+        number=voucher_number,
+        contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
     ).items
@@ -748,7 +895,10 @@ def list_delivery_notes(
 
 @mcp.tool
 def get_delivery_note(identifier: str) -> dict[str, Any]:
-    """Get a delivery note's details by UUID or delivery note number."""
+    """Get a delivery note's details by UUID or delivery note number.
+
+    The only parameter is `identifier` (delivery note number or id).
+    """
     return services.get_delivery_note(_client_get(), identifier)
 
 

@@ -19,6 +19,23 @@ ALL_VOUCHER_TYPES = (
 # When the user asks for an invoice, we look across all three.
 INVOICE_LIKE_TYPES = "salesinvoice,invoice,downpaymentinvoice"
 
+# Every value /v1/voucherlist accepts for voucherType, with a German label for
+# error messages. 'any' = all types. Checked against the API 2026-10-14 —
+# e.g. 'voucher' or 'dunning' are rejected with HTTP 400.
+VOUCHER_TYPE_LABELS = {
+    "salesinvoice": "Ausgangsrechnung",
+    "salescreditnote": "Verkaufsgutschrift",
+    "purchaseinvoice": "Eingangsrechnung",
+    "purchasecreditnote": "Einkaufsgutschrift",
+    "invoice": "Rechnung",
+    "downpaymentinvoice": "Abschlagsrechnung",
+    "creditnote": "Rechnungskorrektur",
+    "orderconfirmation": "Auftragsbestätigung",
+    "quotation": "Angebot",
+    "deliverynote": "Lieferschein",
+    "any": "alle Belegarten",
+}
+
 # Default voucher types for the generic `vouchers list` (sales + purchase docs).
 DEFAULT_VOUCHER_TYPES = (
     "salesinvoice,salescreditnote,purchaseinvoice,purchasecreditnote"

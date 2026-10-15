@@ -76,7 +76,7 @@ def list_articles(
 
 @app.command("get")
 def get_article(ctx: typer.Context, article_id: str) -> None:
-    """Einen Artikel im Detail abrufen."""
+    """Einen Artikel im Detail abrufen (ID oder Artikelnummer)."""
     s = state(ctx)
     with working("Lade Artikel …"):
         data = services.get_article(s.client, article_id)
