@@ -38,6 +38,23 @@ def looks_like_uuid(value: str) -> bool:
     return bool(_UUID_RE.match(value.strip()))
 
 
+def require_contact_id(contact_id: str) -> str:
+    """Check a contact id before it reaches Lexware.
+
+    Lexware answers a shortened or otherwise malformed id only with a bare
+    HTTP 400 ("Invalid value"). Say clearly what is expected instead.
+    """
+    value = contact_id.strip()
+    if not looks_like_uuid(value):
+        raise LexwareError(
+            f"Ungültige Kontakt-ID '{value}': erwartet wird die vollständige ID "
+            "(36 Zeichen, z. B. 8c026ea9-0000-4000-8000-000000000000). "
+            "Den Kontakt bitte zuerst über die Kontaktliste suchen "
+            "(list_contacts mit name oder number) und dessen id verwenden."
+        )
+    return value
+
+
 def resolve_max_items(limit: int, fetch_all: bool = False) -> int | None:
     """Translate a --limit/--all pair into paginate()'s `max_items`.
 
@@ -237,6 +254,8 @@ def _list_voucherlist(
     'overdue', then the remaining states — and merged without duplicates.
     """
     max_items = resolve_max_items(limit, fetch_all)
+    if contact_id:
+        contact_id = require_contact_id(contact_id)
     params: dict[str, Any] = {
         "voucherType": voucher_type,
         "voucherNumber": number,
@@ -1056,6 +1075,7 @@ def list_contacts(
 
 
 def get_contact(client: LexwareClient, contact_id: str) -> dict[str, Any]:
+    contact_id = require_contact_id(contact_id)
     return client.get(f"/v1/contacts/{contact_id}")
 
 
@@ -1075,6 +1095,7 @@ def update_contact(
     just-fetched version — so the caller only ever supplies the fields that
     change and can never break the version handshake.
     """
+    contact_id = require_contact_id(contact_id)
     current = client.get(f"/v1/contacts/{contact_id}")
     changes = _guard_archived_unchanged(current, changes)
     merged = _merge_for_update(current, changes)

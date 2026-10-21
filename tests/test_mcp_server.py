@@ -553,9 +553,9 @@ async def test_wrong_parameter_name_gets_german_hint() -> None:
 
     async with Client(mcp) as c:
         with pytest.raises(ToolError) as excinfo:
-            await c.call_tool("get_invoice", {"invoice_id": "FB2600682"})
+            await c.call_tool("get_invoice", {"rechnung": "FB2600682"})
     message = str(excinfo.value)
-    assert "Diesen Parameter gibt es nicht: invoice_id" in message
+    assert "Diesen Parameter gibt es nicht: rechnung" in message
     assert "Pflichtparameter fehlt: identifier" in message
     assert "Erlaubte Parameter: identifier (Pflicht)" in message
 
@@ -566,9 +566,9 @@ async def test_unknown_list_filter_lists_allowed_parameters() -> None:
 
     async with Client(mcp) as c:
         with pytest.raises(ToolError) as excinfo:
-            await c.call_tool("list_articles", {"query": "Etikett"})
+            await c.call_tool("list_articles", {"bezeichnung": "Etikett"})
     message = str(excinfo.value)
-    assert "Diesen Parameter gibt es nicht: query" in message
+    assert "Diesen Parameter gibt es nicht: bezeichnung" in message
     assert "search" in message
     assert "Pflichtparameter" not in message
 
@@ -598,3 +598,164 @@ async def test_list_quotations_accepts_number_and_contact() -> None:
     params = route.calls.last.request.url.params
     assert params["voucherNumber"] == "AG1"
     assert params["contactId"] == _ART_UUID
+
+
+# -- Geratene Parameternamen (v0.9.3) ----------------------------------------
+
+_CONTACT_UUID = "8c026ea9-4f1e-4b8a-9d3c-2a1b0c9d8e7f"
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool",
+    ["list_vouchers", "list_invoices", "list_order_confirmations", "list_quotations"],
+)
+async def test_list_filters_in_lexware_spelling_are_accepted(tool: str) -> None:
+    rows = [{"id": f"v{i}"} for i in range(8)]
+    route = respx.get("https://api.lexware.io/v1/voucherlist").mock(
+        return_value=httpx.Response(200, json={"content": rows, "last": True})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool(
+            tool,
+            {
+                "voucherNumber": "AB6246",
+                "contactId": _CONTACT_UUID,
+                "status": "open",
+                "size": 5,
+                "page": 0,
+            },
+        )
+    params = route.calls.last.request.url.params
+    assert params["voucherNumber"] == "AB6246"
+    assert params["contactId"] == _CONTACT_UUID
+    assert params["voucherStatus"] == "open"
+    assert len(result.structured_content["result"]) == 5  # size → limit
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize("param", ["id", "voucher_id", "invoice_id", "voucherNumber"])
+async def test_get_voucher_tools_accept_guessed_identifier(param: str) -> None:
+    respx.get("https://api.lexware.io/v1/voucherlist").mock(
+        return_value=httpx.Response(200, json={"content": [{"id": _ART_UUID}], "last": True})
+    )
+    respx.get(f"https://api.lexware.io/v1/invoices/{_ART_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _ART_UUID, "voucherNumber": "RE1"})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool("get_invoice", {param: "RE1"})
+    assert result.data["voucherNumber"] == "RE1"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_articles_accepts_article_number_in_lexware_spelling() -> None:
+    route = respx.get("https://api.lexware.io/v1/articles").mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    async with Client(mcp) as c:
+        await c.call_tool("list_articles", {"articleNumber": "10042"})
+    assert route.calls.last.request.url.params["articleNumber"] == "10042"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_id_maps_to_the_single_id_parameter() -> None:
+    respx.get(f"https://api.lexware.io/v1/contacts/{_CONTACT_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _CONTACT_UUID, "version": 1})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool("get_contact", {"id": _CONTACT_UUID})
+    assert result.data["id"] == _CONTACT_UUID
+
+
+@pytest.mark.asyncio
+async def test_later_page_is_not_dropped_silently() -> None:
+    from fastmcp.exceptions import ToolError
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("list_order_confirmations", {"page": 2})
+    assert "Diesen Parameter gibt es nicht: page" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_alias_does_not_override_explicit_parameter() -> None:
+    from fastmcp.exceptions import ToolError
+
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool(
+                "get_invoice", {"identifier": "RE1", "invoice_id": "RE2"}
+            )
+    assert "Diesen Parameter gibt es nicht: invoice_id" in str(excinfo.value)
+
+
+def test_normalize_arguments_rules() -> None:
+    from lxw_cli.mcp_server import normalize_arguments
+
+    props = {"identifier": {}, "article_id": {}}
+    assert normalize_arguments({"id": "1"}, props) == (
+        {"identifier": "1"},
+        {"id": "identifier"},
+    )
+    # gleicher Wert doppelt → das Duplikat fällt weg
+    assert normalize_arguments({"identifier": "1", "invoice_id": "1"}, {"identifier": {}}) == (
+        {"identifier": "1"},
+        {"invoice_id": "identifier"},
+    )
+    # Unbekanntes bleibt stehen, damit die deutsche Meldung greift
+    assert normalize_arguments({"kunde": "x"}, {"limit": {}}) == ({"kunde": "x"}, {})
+    # `type` sucht sich den passenden Typ-Parameter
+    assert normalize_arguments({"type": "service"}, {"article_type": {}}) == (
+        {"article_type": "service"},
+        {"type": "article_type"},
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_renamed_arguments_are_visible_to_inner_middleware() -> None:
+    from fastmcp.server.middleware import Middleware
+
+    import lxw_cli.mcp_server as mod
+
+    seen: list[object] = []
+
+    class Spy(Middleware):
+        async def on_call_tool(self, context, call_next):  # type: ignore[no-untyped-def]
+            seen.append(mod.renamed_arguments.get())
+            return await call_next(context)
+
+    respx.get("https://api.lexware.io/v1/voucherlist").mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    spy = Spy()
+    mcp.add_middleware(spy)
+    try:
+        async with Client(mcp) as c:
+            await c.call_tool("list_vouchers", {"voucherNumber": "RE1"})
+            await c.call_tool("list_vouchers", {"voucher_number": "RE1"})
+    finally:
+        mcp.middleware.remove(spy)
+    assert seen == [{"voucherNumber": "voucher_number"}, None]
+
+
+# -- Kontakt-ID vorab prüfen (v0.9.3) ----------------------------------------
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_short_contact_id_is_rejected_before_lexware() -> None:
+    from fastmcp.exceptions import ToolError
+
+    route = respx.get("https://api.lexware.io/v1/voucherlist")
+    async with Client(mcp) as c:
+        with pytest.raises(ToolError) as excinfo:
+            await c.call_tool("list_order_confirmations", {"contact_id": "8c026ea9"})
+    message = str(excinfo.value)
+    assert "Ungültige Kontakt-ID '8c026ea9'" in message
+    assert "list_contacts" in message
+    assert not route.called
