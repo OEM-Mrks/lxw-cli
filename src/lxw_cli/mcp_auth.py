@@ -21,6 +21,14 @@ and refresh token) is such a sealed, self-contained Fernet blob — the
 server needs no session store and survives restarts as long as
 ``LXW_MCP_SECRET`` stays the same. Only what must stop working (revoked
 grants, spent refresh tokens) is recorded, see :class:`TokenDenylist`.
+
+Rotating the secret without logging everyone out: put the new secret into
+``LXW_MCP_SECRET`` and the old one into ``LXW_MCP_SECRET_PREVIOUS``. New
+tokens are sealed with the new secret only; tokens sealed with the old one
+are still accepted, and every refresh re-seals them with the new one. After
+REFRESH_TOKEN_TTL (30 days) no valid old token can exist any more and the
+previous secret can be dropped. Dropping it right away is the emergency cut:
+every outstanding token stops working at once.
 """
 
 from __future__ import annotations
@@ -34,12 +42,13 @@ import secrets
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from fastmcp.server.auth import OAuthProvider
 from mcp.server.auth.provider import (
     AccessToken,
@@ -69,6 +78,7 @@ AUTH_CODE_TTL = 10 * 60
 TXN_TTL = 10 * 60
 
 ENV_SECRET = "LXW_MCP_SECRET"
+ENV_SECRET_PREVIOUS = "LXW_MCP_SECRET_PREVIOUS"
 ENV_PUBLIC_URL = "LXW_MCP_PUBLIC_URL"
 ENV_HOST = "LXW_MCP_HOST"
 ENV_PORT = "LXW_MCP_PORT"
@@ -132,11 +142,12 @@ DEFAULT_SCOPE = "mcp"
 # ---------------------------------------------------------------------------
 
 
-def secret_problem(secret: str) -> str | None:
+def secret_problem(secret: str, name: str = ENV_SECRET) -> str | None:
     """Why `secret` is unfit for sealing tokens, or None if it is fine.
 
     A proper Fernet key (32 random bytes) is always fine; a passphrase must be
-    at least MIN_SECRET_LENGTH characters.
+    at least MIN_SECRET_LENGTH characters. `name` is the variable the secret
+    came from, for the message.
     """
     try:
         Fernet(secret.encode())
@@ -145,7 +156,7 @@ def secret_problem(secret: str) -> str | None:
         pass
     if len(secret) < MIN_SECRET_LENGTH:
         return (
-            f"{ENV_SECRET} ist zu kurz ({len(secret)} Zeichen, mindestens "
+            f"{name} ist zu kurz ({len(secret)} Zeichen, mindestens "
             f"{MIN_SECRET_LENGTH}). Ein geeignetes Secret erzeugen mit: "
             "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
         )
@@ -164,6 +175,16 @@ def fernet_from_secret(secret: str) -> Fernet:
     except (ValueError, TypeError):
         digest = hashlib.sha256(secret.encode()).digest()
         return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def token_sealer(secret: str, previous: Sequence[str] = ()) -> MultiFernet:
+    """Seal with `secret`, open tokens sealed with `secret` or any `previous`.
+
+    Empty entries and repeats of the current secret are ignored, so an unset
+    or not yet cleaned-up LXW_MCP_SECRET_PREVIOUS changes nothing.
+    """
+    older = [p for p in dict.fromkeys(previous) if p and p != secret]
+    return MultiFernet([fernet_from_secret(s) for s in (secret, *older)])
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +542,7 @@ class LexwareOAuthProvider(OAuthProvider):
         *,
         public_url: str,
         secret: str,
+        previous_secrets: Sequence[str] = (),
         data_dir: Path | None = None,
         lexware_base_url: str | None = None,
     ) -> None:
@@ -533,7 +555,7 @@ class LexwareOAuthProvider(OAuthProvider):
             ),
             revocation_options=RevocationOptions(enabled=True),
         )
-        self._fernet = fernet_from_secret(secret)
+        self._fernet = token_sealer(secret, previous_secrets)
         directory = data_dir or _default_data_dir()
         self._clients = ClientRegistry(directory / "oauth-clients.json")
         self._denylist = TokenDenylist(directory / "revoked.json")

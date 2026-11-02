@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 import respx
 
 from lxw_cli.core import services
 from lxw_cli.core.client import LexwareClient
+from lxw_cli.core.errors import LexwareError
 
 _PROFILE = "https://api.lexware.io/v1/profile"
 _VOUCHERLIST = "https://api.lexware.io/v1/voucherlist"
@@ -807,3 +809,26 @@ def test_get_article_unknown_number(client: LexwareClient) -> None:
     with pytest.raises(LexwareError) as excinfo:
         services.get_article(client, "GIBTSNICHT")
     assert "Kein Artikel mit Artikelnummer 'GIBTSNICHT'" in str(excinfo.value)
+
+
+# -- Kontakt-ID vorab prüfen (v0.9.3) ----------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["8c026ea9", "Hotel Schempp", "10042", ""])
+def test_require_contact_id_rejects_non_uuid(bad: str) -> None:
+    with pytest.raises(LexwareError, match="Ungültige Kontakt-ID"):
+        services.require_contact_id(bad)
+
+
+def test_require_contact_id_strips_whitespace() -> None:
+    assert services.require_contact_id(f"  {_CONTACT_ID} ") == _CONTACT_ID
+
+
+@respx.mock
+def test_get_contact_checks_id_before_request(client: LexwareClient) -> None:
+    route = respx.get(url__startswith="https://api.lexware.io/v1/contacts/")
+    with pytest.raises(LexwareError, match="Ungültige Kontakt-ID"):
+        services.get_contact(client, "8c026ea9")
+    with pytest.raises(LexwareError, match="Ungültige Kontakt-ID"):
+        services.update_contact(client, "8c026ea9", {"note": "x"})
+    assert not route.called

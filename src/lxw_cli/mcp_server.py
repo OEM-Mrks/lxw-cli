@@ -20,6 +20,9 @@ Runs in two modes:
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -131,17 +134,148 @@ def _validation_errors(exc: BaseException) -> list[dict[str, Any]] | None:
     return None
 
 
-class ArgumentHintMiddleware(Middleware):
-    """Übersetzt falsch geratene Parameternamen in eine klare Ansage.
+# Geratene Namen, die eindeutig einem echten Parameter entsprechen. Gilt nur,
+# wenn das Tool den Zielnamen hat und den geratenen Namen nicht.
+_ARGUMENT_ALIASES: dict[str, tuple[str, ...]] = {
+    "status": ("voucher_status",),
+    "type": ("voucher_type", "article_type"),
+    "size": ("limit",),
+    "page_size": ("limit",),
+    "per_page": ("limit",),
+    "max_results": ("limit",),
+    "archived": ("include_archived",),
+    "query": ("search",),
+    "q": ("search",),
+    # Beleg-/Artikel-Kennungen der Einzelabrufe heißen einheitlich identifier.
+    **{
+        name: ("identifier",)
+        for name in (
+            "voucher_id",
+            "invoice_id",
+            "quotation_id",
+            "order_confirmation_id",
+            "orderconfirmation_id",
+            "order_id",
+            "delivery_note_id",
+            "deliverynote_id",
+            "credit_note_id",
+            "document_id",
+            "voucher_number",
+            "invoice_number",
+            "document_number",
+            "article_number",
+            "number",
+        )
+    },
+}
 
-    KI-Clients raten Parameternamen gern (``invoice_id`` statt
-    ``identifier``). FastMCP lehnt das mit einem technischen
-    Validierungsfehler ab. Wir nennen stattdessen auf Deutsch, welcher Name
-    unbekannt ist, welcher fehlt und welche Parameter das Tool wirklich hat —
-    dann klappt der zweite Versuch sicher.
+# Ohne Paginierung im Tool: page 0/1 ist die erste Seite und kann weg. Eine
+# höhere Seite verwerfen wir nicht still, das würde falsche Ergebnisse liefern.
+_FIRST_PAGE = (None, 0, 1, "0", "1")
+
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])([A-Z])")
+
+# Umbenennungen des laufenden Aufrufs, z. B. für das Aktivitätsprotokoll.
+renamed_arguments: ContextVar[dict[str, str] | None] = ContextVar(
+    "renamed_arguments", default=None
+)
+
+log = logging.getLogger("lxw_cli.mcp")
+
+
+def _snake(name: str) -> str:
+    return _CAMEL_RE.sub(r"_\1", name).lower()
+
+
+def _alias_targets(name: str, properties: dict[str, Any]) -> list[str]:
+    """Mögliche echte Parameternamen für einen geratenen Namen."""
+    snake = _snake(name)
+    targets = [snake, *_ARGUMENT_ALIASES.get(snake, ())]
+    if snake == "id":
+        if "identifier" in properties:
+            targets.append("identifier")
+        else:
+            # update_article(id=…) → article_id, get_dunning(id=…) → dunning_id
+            ids = [p for p in properties if p.endswith("_id")]
+            if len(ids) == 1:
+                targets.append(ids[0])
+    return [t for t in targets if t != name]
+
+
+def normalize_arguments(
+    arguments: dict[str, Any], properties: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Ordnet geratene Parameternamen den echten zu.
+
+    Gibt die bereinigten Argumente und die Umbenennungen (alt → neu, bzw.
+    alt → "" für Verworfenes) zurück. Was nicht eindeutig passt, bleibt
+    unverändert stehen; die Validierung meldet es dann wie bisher.
+    """
+    result = dict(arguments)
+    renamed: dict[str, str] = {}
+    for name, value in arguments.items():
+        if name in properties:
+            continue
+        if name == "page" and "page" not in properties and value in _FIRST_PAGE:
+            del result[name]
+            renamed[name] = ""
+            continue
+        for target in _alias_targets(name, properties):
+            if target not in properties:
+                continue
+            if target in result:
+                # Doppelt mit gleichem Wert (identifier + invoice_id): harmlos.
+                if result[target] == value:
+                    del result[name]
+                    renamed[name] = target
+                break
+            result[target] = result.pop(name)
+            renamed[name] = target
+            break
+    return result, renamed
+
+
+async def _with_normalized_arguments(context: Any) -> Any:
+    renamed_arguments.set(None)
+    message = context.message
+    arguments = getattr(message, "arguments", None)
+    if not arguments:
+        return context
+    tool_name = str(getattr(message, "name", "") or "")
+    tool = await mcp.get_tool(tool_name)
+    schema = getattr(tool, "parameters", None) or {}
+    properties = schema.get("properties") or {}
+    if not properties or all(name in properties for name in arguments):
+        return context
+    fixed, renamed = normalize_arguments(arguments, properties)
+    if not renamed:
+        return context
+    renamed_arguments.set(renamed)
+    log.warning(
+        "Parameter umbenannt (%s): %s",
+        tool_name,
+        ", ".join(f"{old}→{new or '(verworfen)'}" for old, new in renamed.items()),
+    )
+    return context.copy(message=message.model_copy(update={"arguments": fixed}))
+
+
+class ArgumentHintMiddleware(Middleware):
+    """Übersetzt falsch geratene Parameternamen.
+
+    KI-Clients raten Parameternamen gern, meist in der Schreibweise der
+    Lexware-API (``voucherNumber``, ``contactId``) oder als ``id`` statt
+    ``identifier``. Ist die Zuordnung eindeutig, benennen wir vor dem Aufruf
+    still um. Bleibt danach etwas übrig, lehnt FastMCP das mit einem
+    technischen Validierungsfehler ab; wir nennen stattdessen auf Deutsch,
+    welcher Name unbekannt ist, welcher fehlt und welche Parameter das Tool
+    wirklich hat — dann klappt der zweite Versuch sicher.
     """
 
     async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        try:
+            context = await _with_normalized_arguments(context)
+        except Exception:  # noqa: BLE001 — im Zweifel unverändert aufrufen
+            pass
         try:
             return await call_next(context)
         except Exception as exc:
@@ -1221,6 +1355,12 @@ def run_http() -> None:
         LXW_MCP_SECRET      token-sealing secret. Any random string works;
                             without it a fresh one is generated per start
                             and all previously issued tokens stop working.
+        LXW_MCP_SECRET_PREVIOUS
+                            the secret used before the last rotation. Tokens
+                            sealed with it keep working (and are re-sealed
+                            with LXW_MCP_SECRET on refresh); remove it 30
+                            days after the rotation, or at once to log
+                            everyone out.
         LXW_MCP_HOST/PORT   bind address (default 127.0.0.1:8788).
         LXW_MCP_DATA_DIR    where OAuth client registrations live
                             (default: <config dir>/mcp).
@@ -1243,6 +1383,7 @@ def run_http() -> None:
         ENV_PORT,
         ENV_PUBLIC_URL,
         ENV_SECRET,
+        ENV_SECRET_PREVIOUS,
         LexwareOAuthProvider,
         secret_problem,
     )
@@ -1251,6 +1392,15 @@ def run_http() -> None:
     port = int(os.environ.get(ENV_PORT, "8788"))
     public_url = os.environ.get(ENV_PUBLIC_URL, f"http://{host}:{port}")
     secret = os.environ.get(ENV_SECRET, "")
+    previous = os.environ.get(ENV_SECRET_PREVIOUS, "")
+    if previous and not secret:
+        print(
+            f"Fehler: {ENV_SECRET_PREVIOUS} ist gesetzt, {ENV_SECRET} aber "
+            f"nicht. Beim Tausch kommt das neue Secret nach {ENV_SECRET}, "
+            f"das bisherige nach {ENV_SECRET_PREVIOUS}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if not secret:
         secret = secrets.token_urlsafe(32)
         print(
@@ -1264,6 +1414,24 @@ def run_http() -> None:
         if problem:
             print(f"Fehler: {problem}", file=sys.stderr)
             raise SystemExit(2)
+    if previous:
+        problem = secret_problem(previous, ENV_SECRET_PREVIOUS)
+        if problem:
+            print(f"Fehler: {problem}", file=sys.stderr)
+            raise SystemExit(2)
+        if previous == secret:
+            print(
+                f"Hinweis: {ENV_SECRET_PREVIOUS} ist gleich {ENV_SECRET} und "
+                "wird ignoriert.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Hinweis: {ENV_SECRET_PREVIOUS} ist gesetzt — Tokens mit dem "
+                "vorherigen Secret werden noch angenommen und beim Erneuern "
+                "umgestellt. Nach 30 Tagen entfernen.",
+                file=sys.stderr,
+            )
 
     try:
         refresh = float(os.environ.get("LXW_MCP_STATUS_REFRESH", "600"))
@@ -1272,7 +1440,11 @@ def run_http() -> None:
     if refresh > 0:
         status.start_background_refresh(refresh)
 
-    mcp.auth = LexwareOAuthProvider(public_url=public_url, secret=secret)
+    mcp.auth = LexwareOAuthProvider(
+        public_url=public_url,
+        secret=secret,
+        previous_secrets=[previous] if previous else (),
+    )
     mcp.run(
         transport="http",
         host=host,
