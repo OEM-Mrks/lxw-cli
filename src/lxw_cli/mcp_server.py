@@ -1355,6 +1355,12 @@ def run_http() -> None:
         LXW_MCP_SECRET      token-sealing secret. Any random string works;
                             without it a fresh one is generated per start
                             and all previously issued tokens stop working.
+        LXW_MCP_SECRET_PREVIOUS
+                            the secret used before the last rotation. Tokens
+                            sealed with it keep working (and are re-sealed
+                            with LXW_MCP_SECRET on refresh); remove it 30
+                            days after the rotation, or at once to log
+                            everyone out.
         LXW_MCP_HOST/PORT   bind address (default 127.0.0.1:8788).
         LXW_MCP_DATA_DIR    where OAuth client registrations live
                             (default: <config dir>/mcp).
@@ -1377,6 +1383,7 @@ def run_http() -> None:
         ENV_PORT,
         ENV_PUBLIC_URL,
         ENV_SECRET,
+        ENV_SECRET_PREVIOUS,
         LexwareOAuthProvider,
         secret_problem,
     )
@@ -1385,6 +1392,15 @@ def run_http() -> None:
     port = int(os.environ.get(ENV_PORT, "8788"))
     public_url = os.environ.get(ENV_PUBLIC_URL, f"http://{host}:{port}")
     secret = os.environ.get(ENV_SECRET, "")
+    previous = os.environ.get(ENV_SECRET_PREVIOUS, "")
+    if previous and not secret:
+        print(
+            f"Fehler: {ENV_SECRET_PREVIOUS} ist gesetzt, {ENV_SECRET} aber "
+            f"nicht. Beim Tausch kommt das neue Secret nach {ENV_SECRET}, "
+            f"das bisherige nach {ENV_SECRET_PREVIOUS}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if not secret:
         secret = secrets.token_urlsafe(32)
         print(
@@ -1398,6 +1414,24 @@ def run_http() -> None:
         if problem:
             print(f"Fehler: {problem}", file=sys.stderr)
             raise SystemExit(2)
+    if previous:
+        problem = secret_problem(previous, ENV_SECRET_PREVIOUS)
+        if problem:
+            print(f"Fehler: {problem}", file=sys.stderr)
+            raise SystemExit(2)
+        if previous == secret:
+            print(
+                f"Hinweis: {ENV_SECRET_PREVIOUS} ist gleich {ENV_SECRET} und "
+                "wird ignoriert.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Hinweis: {ENV_SECRET_PREVIOUS} ist gesetzt — Tokens mit dem "
+                "vorherigen Secret werden noch angenommen und beim Erneuern "
+                "umgestellt. Nach 30 Tagen entfernen.",
+                file=sys.stderr,
+            )
 
     try:
         refresh = float(os.environ.get("LXW_MCP_STATUS_REFRESH", "600"))
@@ -1406,7 +1440,11 @@ def run_http() -> None:
     if refresh > 0:
         status.start_background_refresh(refresh)
 
-    mcp.auth = LexwareOAuthProvider(public_url=public_url, secret=secret)
+    mcp.auth = LexwareOAuthProvider(
+        public_url=public_url,
+        secret=secret,
+        previous_secrets=[previous] if previous else (),
+    )
     mcp.run(
         transport="http",
         host=host,

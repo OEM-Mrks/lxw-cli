@@ -553,9 +553,20 @@ Zwei Wege, den eigenen Key mitzubringen:
 Hinweise für den Betrieb:
 
 - `LXW_MCP_SECRET` **fest setzen** — ohne festes Secret werden alle Tokens
-  bei jedem Neustart ungültig. Rotieren des Secrets invalidiert bewusst alle
-  ausgestellten Tokens. Das Secret muss ein Fernet-Key oder mindestens
+  bei jedem Neustart ungültig. Das Secret muss ein Fernet-Key oder mindestens
   32 Zeichen lang sein, sonst startet der Server nicht.
+- Laufzeiten: Zugriffstoken 24 Stunden, Refresh-Token 30 Tage. Bei jedem
+  Erneuern gibt es neue Tokens, aktive Nutzer bleiben also angemeldet; wer
+  30 Tage nichts tut, muss sich neu anmelden.
+- **Secret tauschen, ohne dass sich jemand neu anmelden muss:** das neue
+  Secret nach `LXW_MCP_SECRET`, das bisherige nach `LXW_MCP_SECRET_PREVIOUS`,
+  Server neu starten. Neue Tokens werden nur noch mit dem neuen Secret
+  versiegelt, alte werden weiter angenommen und beim nächsten Erneuern
+  umgestellt. Nach 30 Tagen gibt es kein gültiges altes Token mehr, dann
+  `LXW_MCP_SECRET_PREVIOUS` entfernen (oder beim nächsten Tausch einfach
+  überschreiben). **Notfall** (Secret oder Tokens kompromittiert): nur das
+  Secret tauschen, ohne `LXW_MCP_SECRET_PREVIOUS` — dann sind sofort alle
+  ausgestellten Tokens ungültig.
 - Refresh-Tokens sind einmalig gültig (Rotation). Wird ein bereits benutzter
   Refresh-Token erneut vorgelegt, wird die gesamte Verbindung gesperrt.
   Tokens lassen sich über `/revoke` (RFC 7009) widerrufen; die Sperrliste

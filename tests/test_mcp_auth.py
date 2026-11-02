@@ -677,6 +677,119 @@ def test_secret_problem() -> None:
     assert secret_problem(Fernet.generate_key().decode()) is None
     assert secret_problem("x" * 32) is None
     assert "zu kurz" in (secret_problem("ein-langes-zufaelliges-secret") or "")
+    assert "LXW_MCP_SECRET_PREVIOUS ist zu kurz" in (
+        secret_problem("kurz", "LXW_MCP_SECRET_PREVIOUS") or ""
+    )
+
+
+# ---------------------------------------------------------------------------
+# Secret rotation: LXW_MCP_SECRET_PREVIOUS
+# ---------------------------------------------------------------------------
+
+OLD_SECRET = "o" * 40
+NEW_SECRET = "n" * 40
+
+
+@pytest.mark.asyncio
+async def test_rotation_keeps_old_tokens_and_seals_new_ones_with_new_secret(
+    tmp_path,
+) -> None:
+    old = await _grant(_provider(secret=OLD_SECRET, data_dir=tmp_path))
+    rotated = _provider(
+        secret=NEW_SECRET, previous_secrets=[OLD_SECRET], data_dir=tmp_path
+    )
+    # Tokens from before the rotation still work …
+    access = await rotated.load_access_token(old.access_token)
+    assert access is not None and access.claims["lexware_api_key"] == "k" * 20
+    # … but new ones are sealed with the new secret only.
+    fresh = await _grant(rotated)
+    assert await _provider(secret=NEW_SECRET).load_access_token(fresh.access_token)
+    assert (
+        await _provider(secret=OLD_SECRET).load_access_token(fresh.access_token)
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_moves_a_grant_to_the_new_secret(tmp_path) -> None:
+    client = _oauth_client()
+    old = await _grant(_provider(secret=OLD_SECRET, data_dir=tmp_path))
+    rotated = _provider(
+        secret=NEW_SECRET, previous_secrets=[OLD_SECRET], data_dir=tmp_path
+    )
+    rt = await rotated.load_refresh_token(client, old.refresh_token)
+    assert rt is not None
+    renewed = await rotated.exchange_refresh_token(client, rt, [])
+    # Once the previous secret is dropped, the renewed grant keeps working.
+    after = _provider(secret=NEW_SECRET, data_dir=tmp_path)
+    assert await after.load_access_token(renewed.access_token) is not None
+    assert await after.load_refresh_token(client, renewed.refresh_token) is not None
+
+
+@pytest.mark.asyncio
+async def test_dropping_previous_secret_logs_out_unrenewed_tokens(tmp_path) -> None:
+    old = await _grant(_provider(secret=OLD_SECRET, data_dir=tmp_path))
+    after = _provider(secret=NEW_SECRET, data_dir=tmp_path)
+    assert await after.load_access_token(old.access_token) is None
+    assert await after.load_refresh_token(_oauth_client(), old.refresh_token) is None
+
+
+def test_old_secret_tokens_still_expire() -> None:
+    import json
+
+    from lxw_cli.mcp_auth import REFRESH_TOKEN_TTL, fernet_from_secret
+
+    body = json.dumps({"t": "refresh", "client_id": "c1", "key": "k" * 20})
+    stale = fernet_from_secret(OLD_SECRET).encrypt_at_time(
+        body.encode(), int(time.time()) - REFRESH_TOKEN_TTL - 60
+    )
+    rotated = _provider(secret=NEW_SECRET, previous_secrets=[OLD_SECRET])
+    assert rotated._unseal("refresh", stale.decode(), REFRESH_TOKEN_TTL) is None
+
+
+def test_token_sealer_ignores_empty_and_duplicate_previous() -> None:
+    from lxw_cli.mcp_auth import token_sealer
+
+    sealer = token_sealer(NEW_SECRET, ["", NEW_SECRET, OLD_SECRET, OLD_SECRET])
+    assert len(sealer._fernets) == 2
+    assert len(token_sealer(NEW_SECRET)._fernets) == 1
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"LXW_MCP_SECRET_PREVIOUS": OLD_SECRET}, "LXW_MCP_SECRET aber nicht"),
+        (
+            {"LXW_MCP_SECRET": NEW_SECRET, "LXW_MCP_SECRET_PREVIOUS": "kurz"},
+            "LXW_MCP_SECRET_PREVIOUS ist zu kurz",
+        ),
+    ],
+)
+def test_run_http_rejects_bad_previous_secret(monkeypatch, capsys, env, message):
+    from lxw_cli import mcp_server
+
+    monkeypatch.delenv("LXW_MCP_SECRET", raising=False)
+    monkeypatch.delenv("LXW_MCP_SECRET_PREVIOUS", raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda **kw: pytest.fail("ran"))
+    with pytest.raises(SystemExit) as exc:
+        mcp_server.run_http()
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_run_http_passes_previous_secret(monkeypatch, capsys) -> None:
+    from lxw_cli import mcp_server
+
+    monkeypatch.setenv("LXW_MCP_SECRET", NEW_SECRET)
+    monkeypatch.setenv("LXW_MCP_SECRET_PREVIOUS", OLD_SECRET)
+    monkeypatch.setenv("LXW_MCP_STATUS_REFRESH", "0")
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda **kw: None)
+    monkeypatch.setattr(mcp_server.mcp, "auth", mcp_server.mcp.auth)
+    mcp_server.run_http()
+    assert len(mcp_server.mcp.auth._fernet._fernets) == 2
+    assert "werden noch angenommen" in capsys.readouterr().err
 
 
 def test_rate_limiter() -> None:
