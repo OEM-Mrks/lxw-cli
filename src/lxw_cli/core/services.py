@@ -439,7 +439,7 @@ def upload_voucher_file(
     stays the single source of truth for what is accepted.
     """
     voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
-    filename, ctype = _upload_name_and_type(filename, content, content_type)
+    filename, ctype = upload_name_and_type(filename, content, content_type)
     return client.post_multipart(
         f"/v1/vouchers/{voucher_id}/files",
         files={"file": (filename, content, ctype)},
@@ -455,7 +455,7 @@ _SNIFF = (
 )
 
 
-def _upload_name_and_type(
+def upload_name_and_type(
     filename: str, content: bytes, content_type: str | None
 ) -> tuple[str, str]:
     """Pick the multipart filename and content type for an upload.
@@ -466,16 +466,48 @@ def _upload_name_and_type(
     themselves are authoritative: sniff them, and append the matching
     extension when the name lacks one.
     """
+    head = content[:64].lstrip()
     sniffed = next(
-        ((ext, ctype) for magic, ext, ctype in _SNIFF if content.lstrip()[:8].startswith(magic)),
+        ((ext, ctype) for magic, ext, ctype in _SNIFF if head.startswith(magic)),
         None,
     )
     guessed = mimetypes.guess_type(filename)[0]
-    if sniffed and not guessed:
-        filename = f"{filename}.{sniffed[0]}"
-        guessed = sniffed[1]
+    if sniffed and guessed != sniffed[1]:
+        # No or wrong extension (e.g. a PDF named "scan.jpg"): Lexware checks
+        # the extension, so make it match the actual content.
+        stem = filename.rsplit(".", 1)[0] if guessed else filename
+        filename = f"{stem}.{sniffed[0]}"
     ctype = content_type or (sniffed[1] if sniffed else None) or guessed
     return filename, ctype or "application/octet-stream"
+
+
+def image_size(content: bytes) -> tuple[int, int] | None:
+    """Pixel size (width, height) of a PNG or JPEG, else None.
+
+    Header parsing only — no imaging library needed. Used to spot thumbnails
+    a chat assistant produced instead of the real receipt.
+    """
+    if content.startswith(b"\x89PNG\r\n\x1a\n") and len(content) >= 24:
+        return int.from_bytes(content[16:20], "big"), int.from_bytes(content[20:24], "big")
+    if not content.startswith(b"\xff\xd8"):
+        return None
+    i = 2
+    while i + 9 < len(content):
+        if content[i] != 0xFF:
+            i += 1
+            continue
+        marker = content[i + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7 or marker == 0xFF:
+            i += 1 if marker == 0xFF else 2
+            continue
+        length = int.from_bytes(content[i + 2 : i + 4], "big")
+        # SOF0..SOF15 except DHT (C4), JPG (C8), DAC (CC) carry the frame size.
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height = int.from_bytes(content[i + 5 : i + 7], "big")
+            width = int.from_bytes(content[i + 7 : i + 9], "big")
+            return width, height
+        i += 2 + length
+    return None
 
 
 def create_voucher_with_file(

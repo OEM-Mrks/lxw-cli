@@ -569,6 +569,13 @@ class LexwareOAuthProvider(OAuthProvider):
         # KYC allow-list: only known Lexware installations may use the server.
         # Inert (mode 'off') unless configured — see lxw_cli.mcp_allowlist.
         self._allow = AllowList(directory, self._lexware_base_url)
+        # Short-lived per-voucher upload links (original receipt files bypass
+        # the model) — sealed with the same secret, see lxw_cli.mcp_upload.
+        from lxw_cli.mcp_upload import UploadLinks
+
+        self.upload_links = UploadLinks(
+            sealer=self._fernet, public_url=public_url, allow=self._allow
+        )
         # Best-effort replay guard for auth codes (single process).
         self._used_codes: dict[str, float] = {}
         self._used_lock = threading.Lock()
@@ -646,6 +653,7 @@ class LexwareOAuthProvider(OAuthProvider):
         ]
         routes.append(Route("/consent", self._consent_get, methods=["GET"]))
         routes.append(Route("/consent", self._consent_post, methods=["POST"]))
+        routes.extend(self.upload_links.routes())
         return routes
 
     # -- consent page ----------------------------------------------------------
