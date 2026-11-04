@@ -663,6 +663,14 @@ Freischalten (beide Quellen werden gemischt):
   `{"org-id": {"note": "Kunde X"}}`. Wird bei Änderung **automatisch neu
   geladen** (Kunde freischalten ohne Neustart).
 
+**Einzelne Installation sperren:** `"blocked": true` am Eintrag, z. B.
+`{"org-id": {"note": "Kunde X", "blocked": true}}`. Die Sperre wirkt in `log`
+**und** `enforce`, ab dem nächsten Aufruf auch für bereits angemeldete Nutzer
+und für Upload-Links. Der Nutzer sieht beim Neuverbinden „Der Zugang dieser
+Lexware-Installation zum Dienst wurde beendet“ mit der Kontaktadresse.
+Entsperren: `blocked` entfernen oder auf `false` setzen. Im Modus `off` gibt es
+keine Prüfung und damit auch keine Sperre.
+
 Weitere Schalter: `LXW_MCP_ALLOWLIST_CONTACT` (Adresse in der Ablehn-Meldung),
 `LXW_MCP_ALLOWLIST_TTL` (Sekunden Cache für Key→Org-Auflösung, Standard 600),
 `LXW_MCP_ALLOWLIST_FAIL_OPEN=1` (bei nicht erreichbarer Lexware-API —

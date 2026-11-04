@@ -168,3 +168,77 @@ def test_evaluate_unreachable_fails_closed_in_enforce(monkeypatch, tmp_path) -> 
     # log mode stays available during an outage
     gate_log = _gate(monkeypatch, tmp_path, "log")
     assert asyncio.run(gate_log.evaluate("secret-key")).allowed
+
+
+# ---------------------------------------------------------------------------
+# Blocking single organizations ("blocked": true)
+# ---------------------------------------------------------------------------
+
+
+def _write_list(tmp_path: Path, data: object, bump: int = 0) -> None:
+    import os
+
+    path = tmp_path / "allowlist.json"
+    path.write_text(json.dumps(data))
+    if bump:
+        st = path.stat()
+        os.utime(path, (st.st_atime, st.st_mtime + bump))
+
+
+def test_log_mode_blocks_a_blocked_org(monkeypatch, tmp_path) -> None:
+    _write_list(tmp_path, {UNKNOWN: {"note": "Fremde GmbH", "blocked": True}})
+    gate = _gate(monkeypatch, tmp_path, "log", LXW_MCP_ALLOWLIST_CONTACT="mo@oemedia.de")
+    d = gate.evaluate_profile(PROFILE_UNKNOWN, "k")
+    assert not d.allowed and d.reason == "blocked"
+    assert "Zugang" in d.user_message and "beendet" in d.user_message
+    assert "mo@oemedia.de" in d.user_message
+    assert UNKNOWN[:8] in d.user_message
+    # other orgs are unaffected in log mode
+    assert gate.evaluate_profile(PROFILE_KNOWN, "k2").allowed
+
+
+def test_enforce_blocked_entry_is_not_listed(monkeypatch, tmp_path) -> None:
+    _write_list(
+        tmp_path,
+        {KNOWN: {"note": "OE Media"}, UNKNOWN: {"note": "Fremde GmbH", "blocked": True}},
+    )
+    gate = _gate(monkeypatch, tmp_path, "enforce")
+    assert gate.evaluate_profile(PROFILE_KNOWN, "k").allowed
+    d = gate.evaluate_profile(PROFILE_UNKNOWN, "k2")
+    assert not d.allowed and d.reason == "blocked"
+
+
+def test_block_wins_over_inline_env_list(monkeypatch, tmp_path) -> None:
+    _write_list(tmp_path, {KNOWN: {"blocked": True}})
+    gate = _gate(monkeypatch, tmp_path, "enforce", LXW_MCP_ALLOWLIST=KNOWN)
+    assert gate.evaluate_profile(PROFILE_KNOWN, "k").reason == "blocked"
+
+
+def test_blocked_false_or_other_values_do_not_block(monkeypatch, tmp_path) -> None:
+    _write_list(tmp_path, {KNOWN: {"blocked": False}, UNKNOWN: {"blocked": "ja"}})
+    gate = _gate(monkeypatch, tmp_path, "log")
+    assert gate.evaluate_profile(PROFILE_KNOWN, "k").reason == "listed"
+    assert gate.evaluate_profile(PROFILE_UNKNOWN, "k2").allowed
+
+
+def test_block_and_unblock_take_effect_without_restart(monkeypatch, tmp_path) -> None:
+    _write_list(tmp_path, {KNOWN: {"note": "OE Media"}})
+    gate = _gate(monkeypatch, tmp_path, "log")
+    assert gate.evaluate_profile(PROFILE_KNOWN, "k").allowed
+    _write_list(tmp_path, {KNOWN: {"note": "OE Media", "blocked": True}}, bump=10)
+    assert not gate.evaluate_profile(PROFILE_KNOWN, "k").allowed
+    _write_list(tmp_path, {KNOWN: {"note": "OE Media"}}, bump=20)
+    assert gate.evaluate_profile(PROFILE_KNOWN, "k").allowed
+
+
+@respx.mock
+def test_evaluate_blocks_existing_token_of_blocked_org(monkeypatch, tmp_path) -> None:
+    """The per-request path (every tool call, upload link) honours the block."""
+    respx.get(f"{LEXWARE_API}/v1/profile").mock(
+        return_value=httpx.Response(200, json=PROFILE_UNKNOWN)
+    )
+    gate = _gate(monkeypatch, tmp_path, "log")
+    assert asyncio.run(gate.evaluate("secret-key")).allowed
+    _write_list(tmp_path, {UNKNOWN: {"blocked": True}}, bump=10)
+    # cached org resolution, decision re-derived from the current list
+    assert not asyncio.run(gate.evaluate("secret-key")).allowed

@@ -31,7 +31,10 @@ Configuration (all optional; the gate is inert unless mode != off):
                                  object ``{orgId: {"note": "..."}}``.
                                  Hot-reloaded on change — add a customer
                                  without restarting the server. Merged with
-                                 the inline env list.
+                                 the inline env list. An entry with
+                                 ``"blocked": true`` shuts that organization
+                                 out in ``log`` *and* ``enforce`` mode, from
+                                 its next request on (existing tokens too).
 - ``<data_dir>/pending.json``    written by the gate: unknown orgs seen,
                                  with company name / user email / counters.
 - ``LXW_MCP_ALLOWLIST_CONTACT``  address shown in the rejection message so a
@@ -115,6 +118,14 @@ class Decision:
         where = f" Bitte wende dich an {contact} zur Freischaltung." if contact else (
             " Bitte wende dich an den Anbieter zur Freischaltung."
         )
+        if self.reason == "blocked":
+            where = f" Bitte wende dich an {contact}." if contact else (
+                " Bitte wende dich an den Anbieter."
+            )
+            return (
+                "Der Zugang dieser Lexware-Installation zum Dienst wurde beendet."
+                f"{where}{hint}"
+            )
         if self.reason == "unreachable":
             return (
                 "Die Freischaltung konnte gerade nicht geprüft werden "
@@ -155,6 +166,7 @@ class AllowList:
 
         self._lock = threading.Lock()
         self._file_ids: set[str] = set()
+        self._blocked_ids: set[str] = set()
         self._file_mtime: float | None = None
         # key_hash -> (org_id | None, company, email, resolved_at)
         self._cache: dict[str, tuple[str | None, str | None, str | None, float]] = {}
@@ -169,9 +181,10 @@ class AllowList:
                 )
             log.info(
                 "Allow-List-Gate aktiv: Modus=%s, %d Org(s) freigeschaltet, "
-                "fail_open=%s.",
+                "%d gesperrt, fail_open=%s.",
                 self._mode,
-                len(self._inline | self._file_ids),
+                len((self._inline | self._file_ids) - self._blocked_ids),
+                len(self._blocked_ids),
                 self._fail_open,
             )
 
@@ -220,6 +233,10 @@ class AllowList:
     # -- internals ----------------------------------------------------------
 
     def _decide(self, org_id: str, company: str | None, email: str | None) -> Decision:
+        if self._is_blocked(org_id):
+            log.warning("Allow-List: Org %s (%s) ist gesperrt — abgewiesen.",
+                        org_id, company or "?")
+            return Decision(False, self._mode, org_id, company, reason="blocked")
         listed = self._is_listed(org_id)
         if listed:
             return Decision(True, self._mode, org_id, company, reason="listed")
@@ -272,12 +289,17 @@ class AllowList:
         self._load_file()  # cheap: only re-reads on mtime change
         return org_id in self._inline or org_id in self._file_ids
 
+    def _is_blocked(self, org_id: str) -> bool:
+        self._load_file()
+        return org_id in self._blocked_ids
+
     def _load_file(self) -> None:
         try:
             mtime = self._path.stat().st_mtime
         except OSError:
             with self._lock:
                 self._file_ids = set()
+                self._blocked_ids = set()
                 self._file_mtime = None
             return
         with self._lock:
@@ -288,16 +310,24 @@ class AllowList:
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("allowlist.json nicht lesbar: %s", exc)
             return
+        blocked: set[str] = set()
         if isinstance(raw, dict):
             ids = {str(k).strip() for k in raw if str(k).strip()}
+            blocked = {
+                str(k).strip()
+                for k, v in raw.items()
+                if str(k).strip() and isinstance(v, dict) and v.get("blocked") is True
+            }
+            ids -= blocked
         elif isinstance(raw, list):
             ids = {str(k).strip() for k in raw if str(k).strip()}
         else:
             ids = set()
         with self._lock:
             self._file_ids = ids
+            self._blocked_ids = blocked
             self._file_mtime = mtime
-        log.info("allowlist.json neu geladen: %d Org(s).", len(ids))
+        log.info("allowlist.json neu geladen: %d Org(s), %d gesperrt.", len(ids), len(blocked))
 
     def _record_pending(
         self, org_id: str, company: str | None, email: str | None, *, blocked: bool
