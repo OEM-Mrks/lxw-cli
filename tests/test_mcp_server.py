@@ -36,6 +36,7 @@ async def test_tools_are_registered() -> None:
         assert "version" in names
         assert "continue_document" in names
         assert "upload_voucher_file" in names
+        assert "attach_chat_file" in names
         assert "download_voucher_file" in names
         assert "list_posting_categories" in names
         assert "get_payment_status" in names
@@ -897,3 +898,156 @@ async def test_create_upload_link_needs_online_connection() -> None:
     async with Client(mcp) as c:
         with pytest.raises(Exception, match="Online-Verbindung"):
             await c.call_tool("create_upload_link", {"identifier": _UUID})
+
+
+# --- attach_chat_file (ChatGPT openai/fileParams) ---------------------------
+
+_CHAT_URL = "https://files.oaiusercontent.com/file-abc?se=2026&sig=geheim"
+_CHAT_PDF = b"%PDF-1.7 original receipt"
+
+
+def _chat_file(url: str = _CHAT_URL, **extra: str) -> dict[str, str]:
+    return {"download_url": url, "file_id": "file_abc", **extra}
+
+
+@pytest.mark.asyncio
+async def test_attach_chat_file_declares_openai_file_param() -> None:
+    async with Client(mcp) as c:
+        tool = next(t for t in await c.list_tools() if t.name == "attach_chat_file")
+    assert (tool.meta or {}).get("openai/fileParams") == ["file"]
+    schema = tool.inputSchema
+    file_schema = schema["properties"]["file"]
+    if "$ref" in file_schema:  # FastMCP versions differ: inlined or via $defs
+        file_schema = schema["$defs"][file_schema["$ref"].rsplit("/", 1)[-1]]
+    assert file_schema["type"] == "object"
+    assert set(file_schema["properties"]) == {"download_url", "file_id", "mime_type", "file_name"}
+    assert set(file_schema["required"]) == {"download_url", "file_id"}
+    assert set(schema["required"]) == {"identifier", "file"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_fetches_original_and_attaches_it() -> None:
+    fetch = respx.get(_CHAT_URL).mock(return_value=httpx.Response(200, content=_CHAT_PDF))
+    upload = respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(201, json={"id": "f-1"})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool(
+            "attach_chat_file",
+            {"identifier": _UUID, "file": _chat_file(file_name="Rechnung Hotel")},
+        )
+    assert result.data["ok"] is True
+    assert result.data["filename"] == "Rechnung Hotel.pdf"
+    assert result.data["bytes"] == len(_CHAT_PDF)
+    # Our Lexware key never goes to the chat's file host.
+    assert "authorization" not in fetch.calls.last.request.headers
+    body = upload.calls.last.request.content
+    assert _CHAT_PDF in body and b"application/pdf" in body
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example.com/file.pdf",
+        "http://files.oaiusercontent.com/file-abc",
+        "https://files.oaiusercontent.com:8443/file-abc",
+        "https://oaiusercontent.com.evil.example/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "file:///etc/passwd",
+        "kein-link",
+    ],
+)
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_only_fetches_from_chat_hosts(url: str) -> None:
+    upload = respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(201, json={"id": "f-1"})
+    )
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="Datei-Adresse"):
+            await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file(url)})
+    assert not upload.called
+    assert len(respx.calls) == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_checks_every_redirect() -> None:
+    respx.get(_CHAT_URL).mock(
+        return_value=httpx.Response(302, headers={"location": "https://evil.example.com/x"})
+    )
+    evil = respx.get("https://evil.example.com/x").mock(return_value=httpx.Response(200))
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="evil.example.com"):
+            await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file()})
+    assert not evil.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_follows_redirect_within_chat_hosts() -> None:
+    final = "https://sdmntpr.oaiusercontent.com/blob/abc?sig=x"
+    respx.get(_CHAT_URL).mock(return_value=httpx.Response(302, headers={"location": final}))
+    respx.get(final).mock(return_value=httpx.Response(200, content=_CHAT_PDF))
+    upload = respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(201, json={"id": "f-1"})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file()})
+    assert result.data["ok"] is True
+    assert upload.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_reports_expired_download() -> None:
+    respx.get(_CHAT_URL).mock(return_value=httpx.Response(403))
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="HTTP 403"):
+            await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file()})
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_rejects_other_file_types() -> None:
+    respx.get(_CHAT_URL).mock(return_value=httpx.Response(200, content=b"PK\x03\x04zip"))
+    upload = respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(201, json={"id": "f-1"})
+    )
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="Nur PDF, JPG, PNG oder XML"):
+            await c.call_tool(
+                "attach_chat_file",
+                {"identifier": _UUID, "file": _chat_file(file_name="daten.zip")},
+            )
+    assert not upload.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_caps_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lxw_cli.mcp_server as server
+
+    monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 10)
+    respx.get(_CHAT_URL).mock(return_value=httpx.Response(200, content=_CHAT_PDF))
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="zu groß"):
+            await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file()})
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_attach_chat_file_hosts_can_be_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LXW_MCP_CHAT_FILE_HOSTS", "dateien.example.org")
+    url = "https://cdn.dateien.example.org/f.pdf"
+    respx.get(url).mock(return_value=httpx.Response(200, content=_CHAT_PDF))
+    respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(201, json={"id": "f-1"})
+    )
+    async with Client(mcp) as c:
+        args = {"identifier": _UUID, "file": _chat_file(url)}
+        result = await c.call_tool("attach_chat_file", args)
+        assert result.data["ok"] is True
+        with pytest.raises(Exception, match="Datei-Adresse"):
+            await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file()})

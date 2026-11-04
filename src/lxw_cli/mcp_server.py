@@ -21,15 +21,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired
 
+import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 from fastmcp.utilities.types import File
+
+# Pydantic needs typing_extensions' TypedDict on Python < 3.12.
+from typing_extensions import TypedDict
 
 from lxw_cli import __build__, __version__
 from lxw_cli.config import load_config
@@ -617,7 +622,8 @@ _UPLOAD_HOWTO = (
     "JSON for \"ok\": true. If that is not possible (no code environment, "
     "network blocked), give the user the uploadUrl as a clickable link: they "
     "open it and drop the file there. The link is valid for "
-    "expiresInMinutes and only for this voucher."
+    "expiresInMinutes and only for this voucher. In ChatGPT, call "
+    "attach_chat_file with this voucher's id and the user's file instead."
 )
 
 
@@ -1338,6 +1344,107 @@ def create_upload_link(identifier: str) -> dict[str, Any]:
         "voucherNumber": voucher.get("voucherNumber"),
         **_upload_link(voucher["id"], str(voucher.get("voucherNumber") or "")),
     }
+
+
+class ChatFile(TypedDict):
+    """A file the chat app hands to a tool (ChatGPT ``openai/fileParams``)."""
+
+    download_url: str
+    file_id: str
+    mime_type: NotRequired[str]
+    file_name: NotRequired[str]
+
+
+# Hosts ChatGPT serves attached files from. Nothing else is fetched: the
+# server must not turn into a proxy for arbitrary URLs (SSRF).
+DEFAULT_CHAT_FILE_HOSTS = ("oaiusercontent.com", "openai.com", "chatgpt.com")
+ENV_CHAT_FILE_HOSTS = "LXW_MCP_CHAT_FILE_HOSTS"
+CHAT_FILE_TIMEOUT = 30.0
+CHAT_FILE_MAX_REDIRECTS = 3
+
+
+def _chat_file_hosts() -> tuple[str, ...]:
+    raw = os.environ.get(ENV_CHAT_FILE_HOSTS, "")
+    hosts = tuple(h.strip().lower().lstrip(".") for h in raw.split(",") if h.strip())
+    return hosts or DEFAULT_CHAT_FILE_HOSTS
+
+
+def _check_chat_file_url(url: str) -> httpx.URL:
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, TypeError) as exc:
+        raise ValueError("Ungültige Datei-Adresse vom Chat.") from exc
+    host = (parsed.host or "").lower()
+    allowed = any(host == h or host.endswith("." + h) for h in _chat_file_hosts())
+    if parsed.scheme != "https" or parsed.port not in (None, 443) or not allowed:
+        # Host only — the query string of a signed URL is a credential.
+        log.warning("Chat-Datei abgelehnt: Host %r nicht erlaubt", host)
+        raise ValueError(
+            f"Die Datei-Adresse ({host or 'ohne Host'}) gehört nicht zum Chat-"
+            "Dienst — nur vom Chat bereitgestellte Dateien werden geladen. "
+            "Sonst bitte den Upload-Link (create_upload_link) verwenden."
+        )
+    return parsed
+
+
+def _fetch_chat_file(url: str) -> bytes:
+    """Download a chat attachment from the chat app's own file host.
+
+    Redirects are followed by hand so every hop is checked against the host
+    allowlist; no credentials of ours are sent, the size is capped while
+    streaming.
+    """
+    target = _check_chat_file_url(url)
+    with httpx.Client(timeout=CHAT_FILE_TIMEOUT, follow_redirects=False) as http:
+        for _ in range(CHAT_FILE_MAX_REDIRECTS + 1):
+            with http.stream("GET", target) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location", "")
+                    target = _check_chat_file_url(str(target.join(location)))
+                    continue
+                if response.status_code != 200:
+                    raise ValueError(
+                        "Die Datei konnte beim Chat nicht abgeholt werden "
+                        f"(HTTP {response.status_code}). Bitte den Upload-Link "
+                        "(create_upload_link) verwenden."
+                    )
+                data = bytearray()
+                for chunk in response.iter_bytes():
+                    data += chunk
+                    if len(data) > MAX_UPLOAD_BYTES:
+                        raise _too_large(len(data))
+                return bytes(data)
+    raise ValueError("Zu viele Weiterleitungen beim Abholen der Datei.")
+
+
+@mcp.tool(meta={"openai/fileParams": ["file"]})
+def attach_chat_file(identifier: str, file: ChatFile) -> dict[str, Any]:
+    """ChatGPT: attach the file the user put into the chat to an EXISTING
+    voucher — the original, unchanged.
+
+    Pass the user's attached file as `file` (ChatGPT fills in download_url
+    and file_id); never base64-encode, render or shrink it yourself.
+    `identifier` is the voucher's id or number, e.g. the `id` returned by
+    create_voucher_draft. Other chat apps: use the upload link instead.
+    """
+    from lxw_cli.mcp_upload import ACCEPTED_TYPES
+
+    url = file.get("download_url") if isinstance(file, dict) else None
+    if not url:
+        raise ValueError("Keine Datei vom Chat erhalten (download_url fehlt).")
+    content = _fetch_chat_file(url)
+    if not content:
+        raise ValueError("Die Datei vom Chat ist leer.")
+    name = safe_filename(file.get("file_name") or "beleg")
+    name, ctype = services.upload_name_and_type(name, content, None)
+    if ctype not in ACCEPTED_TYPES:
+        raise ValueError(
+            f"{name}: Nur PDF, JPG, PNG oder XML können an einen Beleg gehängt werden."
+        )
+    stored = services.upload_voucher_file(
+        _client_get(), identifier, filename=name, content=content, content_type=ctype
+    )
+    return {"ok": True, "filename": name, "bytes": len(content), "file": stored}
 
 
 @mcp.tool
