@@ -96,7 +96,9 @@ def resolve_voucher_id(
             "/v1/voucherlist",
             params={
                 "voucherType": voucher_type,
-                "voucherStatus": DEFAULT_VOUCHER_STATUSES,
+                # + unchecked: bookkeeping vouchers lacking data (e.g. created
+                # from an upload) — must stay findable by number for attaching.
+                "voucherStatus": f"{DEFAULT_VOUCHER_STATUSES},unchecked",
                 "voucherNumber": identifier,
             },
             max_items=2,
@@ -437,15 +439,88 @@ def upload_voucher_file(
     stays the single source of truth for what is accepted.
     """
     voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
-    ctype = (
-        content_type
-        or mimetypes.guess_type(filename)[0]
-        or "application/octet-stream"
-    )
+    filename, ctype = _upload_name_and_type(filename, content, content_type)
     return client.post_multipart(
         f"/v1/vouchers/{voucher_id}/files",
         files={"file": (filename, content, ctype)},
     )
+
+
+# Magic bytes of the receipt formats Lexware accepts (pdf, jpg, png, xml).
+_SNIFF = (
+    (b"%PDF", "pdf", "application/pdf"),
+    (b"\x89PNG\r\n\x1a\n", "png", "image/png"),
+    (b"\xff\xd8\xff", "jpg", "image/jpeg"),
+    (b"<?xml", "xml", "application/xml"),
+)
+
+
+def _upload_name_and_type(
+    filename: str, content: bytes, content_type: str | None
+) -> tuple[str, str]:
+    """Pick the multipart filename and content type for an upload.
+
+    Callers (especially chat assistants) often pass a bare name like
+    "Rechnung Muster" without extension — the content type would then fall
+    back to application/octet-stream and Lexware rejects the file. The bytes
+    themselves are authoritative: sniff them, and append the matching
+    extension when the name lacks one.
+    """
+    sniffed = next(
+        ((ext, ctype) for magic, ext, ctype in _SNIFF if content.lstrip()[:8].startswith(magic)),
+        None,
+    )
+    guessed = mimetypes.guess_type(filename)[0]
+    if sniffed and not guessed:
+        filename = f"{filename}.{sniffed[0]}"
+        guessed = sniffed[1]
+    ctype = content_type or (sniffed[1] if sniffed else None) or guessed
+    return filename, ctype or "application/octet-stream"
+
+
+def create_voucher_with_file(
+    client: LexwareClient,
+    body: dict[str, Any],
+    *,
+    filename: str,
+    content: bytes,
+) -> dict[str, Any]:
+    """Create a bookkeeping voucher and attach its receipt in one go.
+
+    Lexware needs two steps: the voucher is created first and only its new id
+    can receive the file. If the upload fails *after* the voucher exists, this
+    must not raise — the caller would believe nothing was booked and create a
+    duplicate. Instead the created voucher is returned together with
+    ``fileUpload.error`` so the upload alone can be retried.
+    """
+    created = create_voucher(client, body)
+    voucher_id = created.get("id") if isinstance(created, dict) else None
+    if not voucher_id:
+        return {
+            **(created if isinstance(created, dict) else {}),
+            "fileUpload": {
+                "ok": False,
+                "error": "Lexware hat keine Beleg-id zurückgegeben — Datei nicht angehängt.",
+            },
+        }
+    try:
+        uploaded = upload_voucher_file(
+            client, voucher_id, filename=filename, content=content
+        )
+    except Exception as exc:  # noqa: BLE001 — incl. timeouts; voucher already exists
+        return {
+            **created,
+            "fileUpload": {
+                "ok": False,
+                "error": str(exc) or type(exc).__name__,
+                "hint": (
+                    "Der Beleg wurde angelegt. Nur die Datei erneut mit "
+                    f"upload_voucher_file an id {voucher_id} senden — den Beleg "
+                    "NICHT neu anlegen."
+                ),
+            },
+        }
+    return {**created, "fileUpload": {"ok": True, "file": uploaded}}
 
 
 def download_file(

@@ -157,8 +157,17 @@ class LexwareClient:
 
         `files` follows httpx's format, e.g.
         ``{"file": (filename, content_bytes, content_type)}``.
+
+        Lexware answers uploads with ``202 Accepted`` — sometimes without a
+        JSON body. A successful upload must never surface as an error just
+        because there is nothing to parse, so an empty/non-JSON body yields
+        ``{"status": <code>}`` instead.
         """
-        return self._request("POST", path, files=files).json()
+        response = self._request("POST", path, files=files)
+        body = _safe_json(response)
+        if isinstance(body, dict):
+            return body
+        return {"status": response.status_code} if body is None else body
 
     def get_binary(self, path: str, accept: str = "application/pdf") -> bytes:
         return self._request("GET", path, accept=accept).content
@@ -254,6 +263,9 @@ def _extract_message(response: httpx.Response) -> str:
         detail = _format_validation_details(body.get("details"))
         if detail:
             return detail
+        issues = _format_issue_list(body.get("IssueList"))
+        if issues:
+            return issues
         for key in ("message", "error_description", "error", "title"):
             if key in body and body[key]:
                 return _translate_known_message(str(body[key]))
@@ -276,6 +288,40 @@ _KNOWN_MESSAGES = (
         "noch kein PDF; nach dem Abschließen lässt sich das PDF herunterladen.",
     ),
 )
+
+
+# The bookkeeping-voucher endpoints (/v1/vouchers, …/files) report problems as
+# {"IssueList": [{"i18nKey": "...", "source": "field", ...}]} — machine keys
+# only. Known keys get a plain German sentence; others stay readable.
+_ISSUE_TEXTS = {
+    "inacceptable_file_extension": (
+        "Dateityp nicht akzeptiert — Lexware nimmt nur PDF, JPG, PNG oder XML "
+        "an, und der Dateiname braucht die passende Endung (z. B. „beleg.pdf“)."
+    ),
+    "expected_no_shipping_date_for_given_voucher_type": (
+        "Für diese Belegart ist kein Leistungs-/Lieferdatum erlaubt — bitte "
+        "das Lieferdatum weglassen."
+    ),
+}
+
+
+def _format_issue_list(issues: object) -> str | None:
+    if not isinstance(issues, list):
+        return None
+    parts: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        key = str(issue.get("i18nKey") or "").strip()
+        source = str(issue.get("source") or "").strip()
+        text = _ISSUE_TEXTS.get(key)
+        if not text:
+            text = key.replace("_", " ") or "ungültige Angabe"
+            if source:
+                text = f"Feld „{source}“: {text}"
+        if text not in parts:
+            parts.append(text)
+    return " ".join(parts) or None
 
 
 def _translate_known_message(message: str) -> str:

@@ -146,6 +146,19 @@ _ARGUMENT_ALIASES: dict[str, tuple[str, ...]] = {
     "archived": ("include_archived",),
     "query": ("search",),
     "q": ("search",),
+    # Belegdatei beim Anlegen/Anhängen.
+    **{
+        name: ("file_base64",)
+        for name in (
+            "base64",
+            "file_content",
+            "file_data",
+            "content_base64",
+            "pdf_base64",
+            "file_content_base64",
+        )
+    },
+    "file_name": ("filename",),
     # Beleg-/Artikel-Kennungen der Einzelabrufe heißen einheitlich identifier.
     **{
         name: ("identifier",)
@@ -545,6 +558,33 @@ class BodySizeLimit:
         await send({"type": "http.response.body", "body": b"Request body too large"})
 
 
+def _decode_base64(data: str) -> bytes:
+    """Decode base64 the way chat assistants actually send it.
+
+    Typical shapes besides the clean form: a ``data:application/pdf;base64,``
+    prefix, line breaks every 76 characters (output of ``base64``), missing
+    ``=`` padding, or the URL-safe alphabet. All of these are unambiguous, so
+    accept them instead of failing the whole booking on formatting.
+    """
+    import base64
+    import binascii
+
+    text = data.strip()
+    if text.startswith("data:") and "," in text:
+        text = text.split(",", 1)[1]
+    text = "".join(text.split())
+    if "-" in text or "_" in text:
+        text = text.replace("-", "+").replace("_", "/")
+    text += "=" * (-len(text) % 4)
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(
+            "file_base64 ist kein gültiges Base64 — bitte den Dateiinhalt "
+            "vollständig und unverändert base64-kodiert senden."
+        ) from exc
+
+
 def _resolve_upload(
     file_path: str | None, file_base64: str | None, filename: str | None
 ) -> tuple[bytes, str]:
@@ -555,17 +595,14 @@ def _resolve_upload(
     (with an explicit `filename`).
     """
     if file_base64:
-        import base64
-
         # Check before decoding: base64 is 4/3 of the decoded size.
         approx = len(file_base64) * 3 // 4
         if approx > MAX_UPLOAD_BYTES:
             raise _too_large(approx)
-        try:
-            content = base64.b64decode(file_base64, validate=True)
-        except Exception as exc:  # noqa: BLE001 — report as a clean tool error
-            raise ValueError("file_base64 ist kein gültiges Base64.") from exc
-        return content, safe_filename(filename or "anhang")
+        content = _decode_base64(file_base64)
+        if not content:
+            raise ValueError("file_base64 ist leer — keine Datei zum Anhängen.")
+        return content, safe_filename(filename or "beleg")
     if file_path:
         # Over HTTP `file_path` would name a file on the *server*: any caller
         # with a valid Lexware key could attach server files (secrets, config)
@@ -1124,9 +1161,45 @@ def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool
-def create_voucher_draft(body: dict[str, Any]) -> dict[str, Any]:
-    """Create a generic voucher (for bookkeeping / purchase invoices)."""
-    return services.create_voucher(_client_get(), body)
+def create_voucher_draft(
+    body: dict[str, Any],
+    file_path: str | None = None,
+    file_base64: str | None = None,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Create a bookkeeping voucher (e.g. a purchase invoice / receipt) and
+    optionally attach the original document (PDF/JPG/PNG) in the same call.
+
+    Lexware works in two steps — the voucher is created first, and only its
+    new id can receive the file. This tool does both: pass the receipt as
+    `file_base64` + `filename` (or `file_path` when running on the user's
+    machine) and it is attached right after creation. NEVER put the file or
+    its content into `body` (no `files`, image or base64 fields there).
+
+    Result: the created voucher (`id`, `version`, …) plus `fileUpload`:
+    `{"ok": true, ...}` when the file is attached, or `{"ok": false, "error":
+    ...}` when only the attachment failed. In that case the voucher DOES
+    exist — do not create it again; retry just the file with
+    upload_voucher_file using the returned `id`.
+    """
+    upload = None
+    if file_path or file_base64:
+        # Check the file before booking, so a bad file never leaves a
+        # half-done voucher behind.
+        upload = _resolve_upload(file_path, file_base64, filename)
+    files = body.get("files") if isinstance(body, dict) else None
+    if files and not all(isinstance(f, str) and services.looks_like_uuid(f) for f in files):
+        raise ValueError(
+            "`files` im Beleg darf nur ids bereits hochgeladener Dateien enthalten. "
+            "Die Belegdatei selbst bitte als file_base64 + filename an dieses "
+            "Tool übergeben — sie wird nach dem Anlegen automatisch angehängt."
+        )
+    if upload is None:
+        return services.create_voucher(_client_get(), body)
+    content, name = upload
+    return services.create_voucher_with_file(
+        _client_get(), body, filename=name, content=content
+    )
 
 
 @mcp.tool
@@ -1138,8 +1211,10 @@ def upload_voucher_file(
 ) -> dict[str, Any]:
     """Attach a file (the original receipt/document) to a bookkeeping voucher.
 
-    Use this to add the scan/PDF of a receipt to a voucher after creating it.
-    `identifier` is the voucher's number or id. Provide the file either as a
+    Use this to add the scan/PDF of a receipt to an EXISTING voucher (for a
+    new booking, prefer passing the file directly to create_voucher_draft).
+    `identifier` is the voucher's id (as returned when it was created) or its
+    number. Provide the file either as a
     local `file_path` (only when running on the user's machine — refused over
     the online/HTTP connection) OR as `file_base64` together with a
     `filename`. Accepted files are typically PDF, JPG or PNG; the system
