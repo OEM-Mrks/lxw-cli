@@ -216,7 +216,7 @@ def test_upload_file_path_refused_over_http(
     secret = tmp_path / "secret.pdf"
     secret.write_bytes(b"server-only")
     monkeypatch.setattr(server, "_in_http_request", lambda: True)
-    with pytest.raises(ValueError, match="file_base64"):
+    with pytest.raises(ValueError, match="Upload-Link"):
         server._resolve_upload(str(secret), None, "x.pdf")
     # base64 keeps working over HTTP.
     content, name = server._resolve_upload(None, base64.b64encode(b"ok").decode(), "a.pdf")
@@ -759,3 +759,141 @@ async def test_short_contact_id_is_rejected_before_lexware() -> None:
     assert "Ungültige Kontakt-ID '8c026ea9'" in message
     assert "list_contacts" in message
     assert not route.called
+
+
+_VOUCHERS = "https://api.lexware.io/v1/vouchers"
+_PURCHASE = {"type": "purchaseinvoice", "voucherNumber": "R-1", "voucherItems": []}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_voucher_draft_attaches_file_in_two_steps() -> None:
+    """Create first, then upload to the new id — one tool call for the chat."""
+    create = respx.post(_VOUCHERS).mock(
+        return_value=httpx.Response(201, json={"id": _UUID, "version": 1})
+    )
+    upload = respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(202)  # Lexware: 202 Accepted, may be empty
+    )
+    payload = base64.b64encode(b"%PDF-1.7 beleg").decode()
+    async with Client(mcp) as c:
+        result = await c.call_tool(
+            "create_voucher_draft",
+            {"body": _PURCHASE, "file_base64": payload, "filename": "Rechnung Muster"},
+        )
+    assert create.called and upload.called
+    assert result.data["id"] == _UUID
+    assert result.data["fileUpload"]["ok"] is True
+    sent = upload.calls.last.request.content
+    assert b"%PDF-1.7 beleg" in sent
+    # Missing extension is derived from the content so Lexware accepts it.
+    assert b'filename="Rechnung Muster.pdf"' in sent
+    assert b"application/pdf" in sent
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_voucher_draft_reports_failed_upload_without_error() -> None:
+    """Voucher exists — a failing upload must not look like a failed booking."""
+    respx.post(_VOUCHERS).mock(
+        return_value=httpx.Response(201, json={"id": _UUID, "version": 1})
+    )
+    respx.post(f"{_VOUCHERS}/{_UUID}/files").mock(
+        return_value=httpx.Response(406, json={"message": "Invalid file"})
+    )
+    payload = base64.b64encode(b"%PDF-1.7 x").decode()
+    async with Client(mcp) as c:
+        result = await c.call_tool(
+            "create_voucher_draft",
+            {"body": _PURCHASE, "file_base64": payload, "filename": "a.pdf"},
+        )
+    assert result.data["id"] == _UUID
+    assert result.data["fileUpload"]["ok"] is False
+    assert _UUID in result.data["fileUpload"]["hint"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_voucher_draft_bad_file_books_nothing() -> None:
+    create = respx.post(_VOUCHERS).mock(return_value=httpx.Response(201, json={}))
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="Base64"):
+            await c.call_tool(
+                "create_voucher_draft",
+                {"body": _PURCHASE, "file_base64": "%%%nope%%%", "filename": "a.pdf"},
+            )
+    assert not create.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_voucher_draft_rejects_file_content_in_body() -> None:
+    create = respx.post(_VOUCHERS).mock(return_value=httpx.Response(201, json={}))
+    body = {**_PURCHASE, "files": ["JVBERi0xLjc="]}
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="file_base64"):
+            await c.call_tool("create_voucher_draft", {"body": body})
+    assert not create.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_voucher_draft_without_file_unchanged() -> None:
+    respx.post(_VOUCHERS).mock(
+        return_value=httpx.Response(201, json={"id": _UUID, "version": 1})
+    )
+    async with Client(mcp) as c:
+        result = await c.call_tool("create_voucher_draft", {"body": _PURCHASE})
+    assert result.data == {"id": _UUID, "version": 1}
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.7 abc").decode(),
+        "\n".join(base64.b64encode(b"%PDF-1.7 abc").decode()[i : i + 4] for i in range(0, 16, 4)),
+        base64.b64encode(b"%PDF-1.7 abc").decode().rstrip("="),
+        base64.urlsafe_b64encode(b"%PDF-1.7 abc").decode(),
+    ],
+)
+def test_decode_base64_tolerates_chat_formats(encoded: str) -> None:
+    import lxw_cli.mcp_server as server
+
+    assert server._decode_base64(encoded) == b"%PDF-1.7 abc"
+
+
+def test_image_size_reads_png_and_jpeg() -> None:
+    from lxw_cli.core.services import image_size
+
+    png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+    png += (2480).to_bytes(4, "big") + (3508).to_bytes(4, "big")
+    assert image_size(png) == (2480, 3508)
+    jpeg = b"\xff\xd8\xff\xe0\x00\x04ab\xff\xc0\x00\x11\x08\x00\x78\x00\x55\x03"
+    assert image_size(jpeg) == (85, 120)
+    assert image_size(b"%PDF-1.7") is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_thumbnail_rejected_locally_before_booking() -> None:
+    """Without upload links (stdio) a thumbnail must not book anything."""
+    create = respx.post(_VOUCHERS).mock(return_value=httpx.Response(201, json={}))
+    thumb = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x78\x00\x55\x03" + b"\x00" * 9
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="85×120"):
+            await c.call_tool(
+                "create_voucher_draft",
+                {
+                    "body": _PURCHASE,
+                    "file_base64": base64.b64encode(thumb).decode(),
+                    "filename": "a.jpg",
+                },
+            )
+    assert not create.called
+
+
+@pytest.mark.asyncio
+async def test_create_upload_link_needs_online_connection() -> None:
+    async with Client(mcp) as c:
+        with pytest.raises(Exception, match="Online-Verbindung"):
+            await c.call_tool("create_upload_link", {"identifier": _UUID})

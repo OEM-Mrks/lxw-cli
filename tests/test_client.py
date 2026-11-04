@@ -305,3 +305,25 @@ def test_draft_pdf_conflict_is_translated(client: LexwareClient) -> None:
     assert excinfo.value.status_code == 409
     assert "Entwurf" in str(excinfo.value)
     assert "erst in Lexware abschließen" in str(excinfo.value)
+
+
+@respx.mock
+def test_issue_list_errors_are_readable(client: LexwareClient) -> None:
+    """Voucher endpoints answer with IssueList/i18nKey instead of a message."""
+    respx.post("https://api.lexware.io/v1/vouchers").mock(
+        return_value=httpx.Response(
+            406,
+            json={
+                "IssueList": [
+                    {"i18nKey": "inacceptable_file_extension", "type": "validation_failure"},
+                    {"i18nKey": "missing_entity", "source": "voucherItems[0].categoryId"},
+                ]
+            },
+        )
+    )
+    with pytest.raises(LexwareAPIError) as exc:
+        client.post("/v1/vouchers", {})
+    msg = str(exc.value)
+    assert "Dateityp nicht akzeptiert" in msg
+    assert "voucherItems[0].categoryId" in msg
+    assert "IssueList" not in msg

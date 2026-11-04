@@ -852,3 +852,133 @@ async def test_revocation_endpoint_is_advertised(server: str) -> None:
     async with httpx.AsyncClient(base_url=server) as c:
         meta = (await c.get("/.well-known/oauth-authorization-server")).json()
         assert meta.get("revocation_endpoint")
+
+
+# ---------------------------------------------------------------------------
+# Upload links: the original receipt reaches Lexware without the model
+# ---------------------------------------------------------------------------
+
+_VID = "2cdcdd47-e557-4ff4-9645-931bfd200292"
+_PDF = b"%PDF-1.7\n" + bytes(range(256)) * 40 + b"\n%%EOF\n"  # binary-safe check
+
+
+def _thumbnail_jpeg(width: int = 85, height: int = 120) -> bytes:
+    """Smallest JPEG header image_size() can read (SOF0 with the frame size)."""
+    sof = b"\xff\xc0\x00\x11\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+    return b"\xff\xd8" + sof + b"\x03" + b"\x00" * 9 + b"\xff\xd9"
+
+
+async def test_voucher_upload_link_end_to_end(server: str) -> None:
+    from fastmcp import Client
+
+    raw_key = "raw-key-upload-123456"
+    with respx.mock:
+        respx.route(host="127.0.0.1").pass_through()
+        respx.post(f"{LEXWARE_API}/v1/vouchers").mock(
+            return_value=httpx.Response(201, json={"id": _VID, "version": 1})
+        )
+        files_route = respx.post(f"{LEXWARE_API}/v1/vouchers/{_VID}/files").mock(
+            return_value=httpx.Response(202, json={"id": "file-1"})
+        )
+        async with Client(f"{server}/mcp", auth=raw_key) as mc:
+            result = await mc.call_tool(
+                "create_voucher_draft",
+                {"body": {"type": "purchaseinvoice", "voucherNumber": "100123"}},
+            )
+        info = result.data["fileUpload"]
+        assert result.data["id"] == _VID
+        assert info["attached"] is False
+        url = info["uploadUrl"]
+        assert url.startswith(f"{server}/upload/")
+        assert raw_key not in url  # the key travels sealed only
+        assert "curl" in info["howTo"]
+
+        async with httpx.AsyncClient() as http:
+            page = await http.get(url)
+            assert page.status_code == 200
+            assert 'type="file"' in page.text and "100123" in page.text
+            assert page.headers["x-frame-options"] == "DENY"
+
+            # What a code sandbox does: curl -F file=@original.pdf <url>
+            resp = await http.post(url, files={"file": ("Hotel Rechnung", _PDF, "application/pdf")})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ok"] is True
+        sent = files_route.calls.last.request
+        assert sent.headers["authorization"] == f"Bearer {raw_key}"
+        assert _PDF in sent.content  # byte-identical original
+        assert b'filename="Hotel Rechnung.pdf"' in sent.content
+
+
+async def test_upload_link_rejects_bad_tokens_and_types(server: str) -> None:
+    from fastmcp import Client
+
+    with respx.mock:
+        respx.route(host="127.0.0.1").pass_through()
+        respx.get(f"{LEXWARE_API}/v1/vouchers/{_VID}").mock(
+            return_value=httpx.Response(200, json={"id": _VID, "voucherNumber": "R-7"})
+        )
+        files_route = respx.post(f"{LEXWARE_API}/v1/vouchers/{_VID}/files").mock(
+            return_value=httpx.Response(202, json={"id": "f"})
+        )
+        async with Client(f"{server}/mcp", auth="raw-key-upload-777777") as mc:
+            link = (await mc.call_tool("create_upload_link", {"identifier": _VID})).data
+        assert link["voucherNumber"] == "R-7"
+
+        async with httpx.AsyncClient() as http:
+            bogus = f"{server}/upload/gAAAAAinvalid"
+            assert (await http.get(bogus)).status_code == 410
+            assert (await http.post(bogus, files={"file": ("a.pdf", _PDF)})).status_code == 410
+
+            wrong = await http.post(link["uploadUrl"], files={"file": ("x.exe", b"MZ\x90\x00")})
+            assert wrong.status_code == 400
+            assert wrong.json()["files"][0]["ok"] is False
+
+            # Browser form post gets an HTML answer.
+            html_resp = await http.post(
+                link["uploadUrl"],
+                files={"file": ("scan.pdf", _PDF, "application/pdf")},
+                headers={"Accept": "text/html"},
+            )
+            assert html_resp.status_code == 200
+            assert "angehängt" in html_resp.text
+        assert files_route.call_count == 1
+
+
+async def test_upload_link_token_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lxw_cli.mcp_upload as up
+
+    provider = _provider()
+    link = provider.upload_links.create(api_key="k" * 20, voucher_id=_VID)
+    token = link["uploadUrl"].rsplit("/", 1)[1]
+    assert provider.upload_links._unseal(token)["v"] == _VID
+    # An access token sealed with the same secret is not an upload token.
+    monkeypatch.setattr(up, "UPLOAD_LINK_TTL", -1)
+    assert provider.upload_links._unseal(token) is None
+
+
+async def test_thumbnail_base64_books_voucher_and_offers_link(server: str) -> None:
+    """The 85×120 px stand-in is refused, the booking still happens + link."""
+    from fastmcp import Client
+
+    with respx.mock:
+        respx.route(host="127.0.0.1").pass_through()
+        respx.post(f"{LEXWARE_API}/v1/vouchers").mock(
+            return_value=httpx.Response(201, json={"id": _VID, "version": 1})
+        )
+        files_route = respx.post(f"{LEXWARE_API}/v1/vouchers/{_VID}/files").mock(
+            return_value=httpx.Response(202, json={"id": "f"})
+        )
+        async with Client(f"{server}/mcp", auth="raw-key-thumb-123456") as mc:
+            result = await mc.call_tool(
+                "create_voucher_draft",
+                {
+                    "body": {"type": "purchaseinvoice"},
+                    "file_base64": base64.b64encode(_thumbnail_jpeg()).decode(),
+                    "filename": "beleg.jpg",
+                },
+            )
+    info = result.data["fileUpload"]
+    assert result.data["id"] == _VID
+    assert "85×120" in info["error"]
+    assert info["uploadUrl"].startswith(f"{server}/upload/")
+    assert not files_route.called

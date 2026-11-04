@@ -463,7 +463,7 @@ Claude erkennt die Tools automatisch und ruft sie auf.
 - **Mahnungen**: `create_dunning` erstellt aus einer überfälligen (festgeschriebenen, noch offenen) Rechnung eine Mahnung als Entwurf — ein erneuter Aufruf erhöht die Mahnstufe. `get_dunning` und `download_dunning_pdf` rufen eine Mahnung ab. **Nur per id** ansprechbar: Mahnungen sind in der Lexware-API nicht auflistbar (kein Listing, keine Belegnummer-Suche); die id stammt aus dem Erstellen oder den verknüpften Belegen der Rechnung.
 - **Lesen**: `profile`, `list_invoices`, `get_invoice`, `get_payment_status`, `download_invoice_pdf`, `list_contacts`, `get_contact`, `list_vouchers`, `get_voucher`, `list_posting_categories`, `list_articles`, `get_article`, `list_quotations`, `get_quotation`, `download_quotation_pdf`, `list_order_confirmations`, `get_order_confirmation`, `download_order_confirmation_pdf`, `list_delivery_notes`, `get_delivery_note`, `download_delivery_note_pdf`
 - **Belege als Draft anlegen**: `create_invoice_draft`, `create_voucher_draft`, `create_quotation_draft`, `create_order_confirmation_draft`, `create_delivery_note_draft`
-- **Beleg-Anhänge**: `upload_voucher_file` hängt einen Originalbeleg (PDF/JPG/PNG) an einen Beleg (lokaler Pfad oder Base64), `download_voucher_file` lädt eine angehängte Datei über ihre id herunter. Größe/Typ prüft Lexware serverseitig.
+- **Beleg-Anhänge**: Lexware braucht zwei Schritte (erst Beleg anlegen, dann Datei an die neue Beleg-id). **Online (claude.ai, ChatGPT):** `create_voucher_draft` liefert zum angelegten Beleg einen **Upload-Link** (30 Minuten gültig, nur für diesen Beleg). Darüber kommt die **Originaldatei unverändert** zu Lexware — entweder lädt der Chat sie aus seiner Code-Umgebung per `curl -F file=@…` hoch, oder der Nutzer öffnet den Link und zieht die Datei hinein. Hintergrund: Muss ein Chat die Datei selbst als Base64-Text in den Aufruf schreiben, verkleinert er sie zu einem unlesbaren Vorschaubild; solche Mini-Bilder (< 800 px) lehnt der Server ab. `create_upload_link` erzeugt einen Link für einen bestehenden Beleg. **Lokal (stdio):** `create_voucher_draft` / `upload_voucher_file` nehmen `file_path` und hängen die Datei direkt an. Scheitert nur das Anhängen, bleibt der Beleg bestehen und die Antwort sagt das klar (kein Fehler, der zum doppelten Buchen verleitet). `download_voucher_file` lädt eine angehängte Datei über ihre id herunter. Größe/Typ prüft Lexware (PDF/JPG/PNG/XML, max. 5 MB).
 - **Stammdaten anlegen** (kein Draft): `create_contact`, `create_article`
 - **Stammdaten bearbeiten** (Teil-Update mit Auto-Merge + automatischem `version`-Handling): `update_contact`, `update_article`. Es werden nur die übergebenen Felder geändert; verschachtelte Objekte werden feldweise zusammengeführt, Listen komplett ersetzt. (Kontakt-`archived` ist in der Lexware-API read-only — Lexware würde eine Änderung stillschweigend verwerfen; `update_contact` lehnt Archivieren/Wiederherstellen daher mit klarer Meldung ab und ändert nichts. Das geht nur in der Lexware-Weboberfläche. Firmen-Kontakte mit **mehr als einem Ansprechpartner** lassen sich per Lexware-API grundsätzlich nicht aktualisieren — `update_contact` meldet das klar, statt eines rohen HTTP 406.)
 - **Funktionswunsch melden**: `request_feature` erstellt einen **unverbindlichen** Feature-Wunsch als fertigen Text (`subject`/`body`) samt Anbieter-Adresse (`to` = david@oemedia.de). Der Server **versendet nichts** — der Nutzer kopiert den Text und schickt ihn selbst per E-Mail. Dies ist ein Endkundenprodukt: der Assistent baut keine Funktionen selbst, sondern bietet bei fehlenden Funktionen nur diesen Weg an.
@@ -589,8 +589,14 @@ Hinweise für den Betrieb:
   Weitere Ziele per `LXW_MCP_REDIRECT_ALLOW` (kommagetrennt; Host = https auf
   diesem Host, `schema:` = eigenes Schema). Registrierungen mit anderen Zielen
   werden abgelehnt, bereits gespeicherte ignoriert.
-- Datei-Uploads akzeptieren über HTTP nur `file_base64`; `file_path` (eine
-  Datei auf der Server-Platte) wird abgelehnt.
+- Datei-Uploads laufen über HTTP per **Upload-Link** (`/upload/<token>`, Formular ohne
+  JavaScript bzw. `curl -F file=@…`); `file_path` (eine Datei auf der Server-Platte)
+  wird abgelehnt. Das Token ist wie die OAuth-Tokens mit `LXW_MCP_SECRET` versiegelt
+  (Key + Beleg-id, 30 Minuten) — ein geleakter Link erlaubt nur das Anhängen an diesen
+  einen Beleg. Damit der Chat die Datei **automatisch** hochladen kann, muss die
+  Server-Domain in den Netzwerk-Einstellungen der Code-Umgebung erlaubt sein
+  (bei claude.ai in den Einstellungen zur Code-Ausführung bzw. Netzwerkfreigabe);
+  sonst bekommt der Nutzer den Link zum Anklicken.
 - Der Server prüft im Hintergrund alle 10 Minuten den Lexware-Betriebsstatus
   (`LXW_MCP_STATUS_REFRESH`, Sekunden; `0` schaltet das ab). Das hält den
   Zwischenspeicher warm, damit der Fehlerpfad sofort antwortet, und schreibt

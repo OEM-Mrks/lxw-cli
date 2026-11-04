@@ -72,7 +72,10 @@ mcp: FastMCP = FastMCP(
         "(Internal, do not surface: documents can be addressed by their number "
         "such as 'FB2600682' or an id; PDF downloads return the PDF itself. When "
         "a document line item is based on an article, fetch that article first "
-        "and copy its description into the line item's description.)"
+        "and copy its description into the line item's description. A receipt "
+        "file the user shares must reach Lexware as the unchanged original: "
+        "never render, convert, compress or shrink it — use the upload link "
+        "returned when the voucher is created and follow its instructions.)"
         # --- Several installations ---
         " Several Lexware installations (companies) may be connected at the "
         "same time as separate servers. Never mix up their data: before "
@@ -146,6 +149,19 @@ _ARGUMENT_ALIASES: dict[str, tuple[str, ...]] = {
     "archived": ("include_archived",),
     "query": ("search",),
     "q": ("search",),
+    # Belegdatei beim Anlegen/Anhängen.
+    **{
+        name: ("file_base64",)
+        for name in (
+            "base64",
+            "file_content",
+            "file_data",
+            "content_base64",
+            "pdf_base64",
+            "file_content_base64",
+        )
+    },
+    "file_name": ("filename",),
     # Beleg-/Artikel-Kennungen der Einzelabrufe heißen einheitlich identifier.
     **{
         name: ("identifier",)
@@ -545,6 +561,88 @@ class BodySizeLimit:
         await send({"type": "http.response.body", "body": b"Request body too large"})
 
 
+def _decode_base64(data: str) -> bytes:
+    """Decode base64 the way chat assistants actually send it.
+
+    Typical shapes besides the clean form: a ``data:application/pdf;base64,``
+    prefix, line breaks every 76 characters (output of ``base64``), missing
+    ``=`` padding, or the URL-safe alphabet. All of these are unambiguous, so
+    accept them instead of failing the whole booking on formatting.
+    """
+    import base64
+    import binascii
+
+    text = data.strip()
+    if text.startswith("data:") and "," in text:
+        text = text.split(",", 1)[1]
+    text = "".join(text.split())
+    if "-" in text or "_" in text:
+        text = text.replace("-", "+").replace("_", "/")
+    text += "=" * (-len(text) % 4)
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(
+            "file_base64 ist kein gültiges Base64 — bitte den Dateiinhalt "
+            "vollständig und unverändert base64-kodiert senden."
+        ) from exc
+
+
+# A receipt image whose longest side is below this is a thumbnail, not a
+# readable document (A4 at 100 dpi is 827×1169; phone photos are 3000+).
+# Chat assistants that must squeeze a file into a tool call as base64 text
+# shrink it to exactly such a thumbnail (seen: 85×120 px, 2 KB).
+MIN_RECEIPT_IMAGE_EDGE = 800
+
+
+class UnreadableFile(ValueError):
+    """The supplied file is a shrunken stand-in, not the original receipt."""
+
+
+def _check_not_thumbnail(content: bytes) -> None:
+    size = services.image_size(content)
+    if size and max(size) < MIN_RECEIPT_IMAGE_EDGE:
+        width, height = size
+        raise UnreadableFile(
+            f"Das Bild ist nur {width}×{height} Pixel groß — ein verkleinertes "
+            "Vorschaubild, auf dem der Beleg nicht lesbar ist. Die Originaldatei "
+            "muss unverändert übertragen werden (Upload-Link)."
+        )
+
+
+_UPLOAD_HOWTO = (
+    "Attach the ORIGINAL file unchanged — never re-encode, render or shrink it. "
+    "If you can run code where the user's file is (e.g. /mnt/user-data/uploads/"
+    "<name>), run: curl -sS -F \"file=@<path>\" \"<uploadUrl>\" and check the "
+    "JSON for \"ok\": true. If that is not possible (no code environment, "
+    "network blocked), give the user the uploadUrl as a clickable link: they "
+    "open it and drop the file there. The link is valid for "
+    "expiresInMinutes and only for this voucher."
+)
+
+
+def _upload_links_available() -> bool:
+    """True in an authenticated online (HTTP) call where links can be minted."""
+    from lxw_cli.mcp_auth import request_api_key
+
+    return (
+        getattr(mcp.auth, "upload_links", None) is not None
+        and request_api_key() is not None
+    )
+
+
+def _upload_link(voucher_id: str, label: str = "") -> dict[str, Any]:
+    from lxw_cli.mcp_auth import request_api_key
+
+    links = mcp.auth.upload_links  # type: ignore[union-attr]
+    api_key = request_api_key()
+    assert api_key is not None  # guarded by _upload_links_available()
+    return {
+        **links.create(api_key=api_key, voucher_id=voucher_id, label=label),
+        "howTo": _UPLOAD_HOWTO,
+    }
+
+
 def _resolve_upload(
     file_path: str | None, file_base64: str | None, filename: str | None
 ) -> tuple[bytes, str]:
@@ -555,17 +653,17 @@ def _resolve_upload(
     (with an explicit `filename`).
     """
     if file_base64:
-        import base64
-
         # Check before decoding: base64 is 4/3 of the decoded size.
         approx = len(file_base64) * 3 // 4
         if approx > MAX_UPLOAD_BYTES:
             raise _too_large(approx)
-        try:
-            content = base64.b64decode(file_base64, validate=True)
-        except Exception as exc:  # noqa: BLE001 — report as a clean tool error
-            raise ValueError("file_base64 ist kein gültiges Base64.") from exc
-        return content, safe_filename(filename or "anhang")
+        content = _decode_base64(file_base64)
+        if not content:
+            raise ValueError("file_base64 ist leer — keine Datei zum Anhängen.")
+        # base64 is typed out by the assistant — exactly where originals get
+        # shrunk to thumbnails. A local file_path is the user's real file.
+        _check_not_thumbnail(content)
+        return content, safe_filename(filename or "beleg")
     if file_path:
         # Over HTTP `file_path` would name a file on the *server*: any caller
         # with a valid Lexware key could attach server files (secrets, config)
@@ -573,7 +671,8 @@ def _resolve_upload(
         if _in_http_request():
             raise ValueError(
                 "file_path ist über die Online-Verbindung nicht möglich — "
-                "bitte die Datei als file_base64 zusammen mit filename senden."
+                "bitte die Datei über den Upload-Link (create_upload_link) "
+                "anhängen."
             )
         source = Path(file_path).expanduser().resolve()
         ext = source.suffix.lstrip(".").lower()
@@ -1124,9 +1223,71 @@ def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool
-def create_voucher_draft(body: dict[str, Any]) -> dict[str, Any]:
-    """Create a generic voucher (for bookkeeping / purchase invoices)."""
-    return services.create_voucher(_client_get(), body)
+def create_voucher_draft(
+    body: dict[str, Any],
+    file_path: str | None = None,
+    file_base64: str | None = None,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Create a bookkeeping voucher (e.g. a purchase invoice / receipt) and
+    attach the original document (PDF/JPG/PNG).
+
+    Lexware works in two steps — the voucher is created first, and only its
+    new id can receive the file. NEVER put the file or its content into
+    `body` (no `files`, image or base64 fields there).
+
+    Attaching the receipt the user gave you in the chat:
+    - Online connection: call this WITHOUT file arguments. The result's
+      `fileUpload` holds an `uploadUrl`; follow its `howTo` so the ORIGINAL
+      file reaches Lexware unchanged. Do NOT base64-encode, render, convert
+      or shrink the file yourself — that produces an unreadable thumbnail
+      (tiny images are rejected).
+    - On the user's machine: pass `file_path` (or `file_base64` + `filename`
+      for a small file you have byte-exact) and it is attached right after
+      creation.
+
+    Result: the created voucher (`id`, `version`, …) plus `fileUpload`
+    (`ok: true` when attached; otherwise an `uploadUrl`/`error`). The voucher
+    DOES exist even if attaching failed — never create it again.
+    """
+    files = body.get("files") if isinstance(body, dict) else None
+    if files and not all(isinstance(f, str) and services.looks_like_uuid(f) for f in files):
+        raise ValueError(
+            "`files` im Beleg darf nur ids bereits hochgeladener Dateien enthalten. "
+            "Die Belegdatei selbst nicht in den Beleg packen — sie wird nach dem "
+            "Anlegen angehängt (Upload-Link bzw. file_base64/file_path)."
+        )
+    links = _upload_links_available()
+    upload = None
+    unreadable: UnreadableFile | None = None
+    if file_path or file_base64:
+        # Check the file before booking, so a bad file never leaves a
+        # half-done voucher behind.
+        try:
+            upload = _resolve_upload(file_path, file_base64, filename)
+        except UnreadableFile as exc:
+            # Online, the voucher can still be booked and the original
+            # attached via the upload link; locally there is no such way.
+            if not links:
+                raise
+            unreadable = exc
+    client = _client_get()
+    label = str(body.get("voucherNumber") or "") if isinstance(body, dict) else ""
+    if upload is None:
+        created = services.create_voucher(client, body)
+        voucher_id = created.get("id") if isinstance(created, dict) else None
+        if not (links and voucher_id):
+            return created
+        attach: dict[str, Any] = {"attached": False}
+        if unreadable is not None:
+            attach["error"] = str(unreadable)
+        return {**created, "fileUpload": {**attach, **_upload_link(voucher_id, label)}}
+    content, name = upload
+    result = services.create_voucher_with_file(client, body, filename=name, content=content)
+    upload_info = result.get("fileUpload") or {}
+    if links and result.get("id") and not upload_info.get("ok"):
+        upload_info.update(_upload_link(result["id"], label))
+    return result
 
 
 @mcp.tool
@@ -1136,20 +1297,47 @@ def upload_voucher_file(
     file_base64: str | None = None,
     filename: str | None = None,
 ) -> dict[str, Any]:
-    """Attach a file (the original receipt/document) to a bookkeeping voucher.
+    """Attach a file to an EXISTING voucher from bytes you already hold exactly.
 
-    Use this to add the scan/PDF of a receipt to a voucher after creating it.
-    `identifier` is the voucher's number or id. Provide the file either as a
-    local `file_path` (only when running on the user's machine — refused over
-    the online/HTTP connection) OR as `file_base64` together with a
-    `filename`. Accepted files are typically PDF, JPG or PNG; the system
-    enforces its own size limit and reports clearly if a file is rejected.
-    Returns a reference to the stored attachment.
+    Online, to attach a receipt the user gave you in the chat, use
+    create_upload_link instead — it transfers the original file unchanged.
+    This tool is for a local `file_path` (user's machine only) or a small
+    file you have byte-exact as `file_base64` + `filename`. Never render,
+    convert or shrink a file to fit it in here; tiny images are rejected.
+    `identifier` is the voucher's id or number. Returns the stored file's id.
     """
-    content, name = _resolve_upload(file_path, file_base64, filename)
+    try:
+        content, name = _resolve_upload(file_path, file_base64, filename)
+    except UnreadableFile as exc:
+        if _upload_links_available():
+            raise ValueError(f"{exc} Bitte create_upload_link verwenden.") from exc
+        raise
     return services.upload_voucher_file(
         _client_get(), identifier, filename=name, content=content
     )
+
+
+@mcp.tool
+def create_upload_link(identifier: str) -> dict[str, Any]:
+    """Get a short-lived link that attaches the ORIGINAL receipt file to an
+    existing voucher (online connection only).
+
+    `identifier` is the voucher's id or number. Follow the returned `howTo`:
+    upload the user's file unchanged from your code environment with curl, or
+    give the user the link to open and drop the file there. The link works
+    for 30 minutes and only for this one voucher.
+    """
+    if not _upload_links_available():
+        raise ValueError(
+            "Upload-Links gibt es nur über die Online-Verbindung — lokal die "
+            "Datei bitte mit file_path anhängen."
+        )
+    voucher = services.get_voucher(_client_get(), identifier)
+    return {
+        "voucherId": voucher["id"],
+        "voucherNumber": voucher.get("voucherNumber"),
+        **_upload_link(voucher["id"], str(voucher.get("voucherNumber") or "")),
+    }
 
 
 @mcp.tool
