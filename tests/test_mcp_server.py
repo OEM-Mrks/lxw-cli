@@ -1051,3 +1051,18 @@ async def test_attach_chat_file_hosts_can_be_configured(monkeypatch: pytest.Monk
         assert result.data["ok"] is True
         with pytest.raises(Exception, match="Datei-Adresse"):
             await c.call_tool("attach_chat_file", {"identifier": _UUID, "file": _chat_file()})
+
+
+def test_chat_file_eu_storage_host_allowed_but_not_all_of_azure(monkeypatch) -> None:
+    """EU-ChatGPT liefert Dateien aus OpenAIs Azure-Speicher (Nov 2026)."""
+    import lxw_cli.mcp_server as mcp_server
+
+    monkeypatch.delenv(mcp_server.ENV_CHAT_FILE_HOSTS, raising=False)
+    ok = "https://oaisdmntprnortheu.blob.core.windows.net/files/x.pdf?sig=s"
+    assert mcp_server._check_chat_file_url(ok).host == "oaisdmntprnortheu.blob.core.windows.net"
+    for bad in (
+        "https://evil.blob.core.windows.net/x.pdf",
+        "https://oaisdmntprnortheu.blob.core.windows.net.evil.com/x.pdf",
+    ):
+        with pytest.raises(ValueError):
+            mcp_server._check_chat_file_url(bad)

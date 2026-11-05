@@ -1191,6 +1191,12 @@ def create_invoice_draft(body: dict[str, Any]) -> dict[str, Any]:
     Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
     Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
     max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
+
+    Defaults when omitted: `voucherDate` today (plain dates like 2026-11-04
+    are fine), `totalPrice` EUR, `taxConditions.taxType` net, line item
+    `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
+    days. Line item type `custom` = free position with name and unitPrice;
+    `material`/`service` only with the article's `id`.
     """
     return services.create_invoice(_client_get(), body)
 
@@ -1251,6 +1257,9 @@ def create_voucher_draft(
     - On the user's machine: pass `file_path` (or `file_base64` + `filename`
       for a small file you have byte-exact) and it is attached right after
       creation.
+
+    Each item's `taxAmount` and the totals are calculated from `amount`,
+    `taxRatePercent` and `taxType` (gross: amounts incl. tax, net: excl.).
 
     Result: the created voucher (`id`, `version`, …) plus `fileUpload`
     (`ok: true` when attached; otherwise an `uploadUrl`/`error`). The voucher
@@ -1356,8 +1365,16 @@ class ChatFile(TypedDict):
 
 
 # Hosts ChatGPT serves attached files from. Nothing else is fetched: the
-# server must not turn into a proxy for arbitrary URLs (SSRF).
-DEFAULT_CHAT_FILE_HOSTS = ("oaiusercontent.com", "openai.com", "chatgpt.com")
+# server must not turn into a proxy for arbitrary URLs (SSRF). EU workspaces
+# get their files from OpenAI's Azure storage account — that one account is
+# listed by its full name, never the whole `blob.core.windows.net` (anyone
+# can host files there).
+DEFAULT_CHAT_FILE_HOSTS = (
+    "oaiusercontent.com",
+    "openai.com",
+    "chatgpt.com",
+    "oaisdmntprnortheu.blob.core.windows.net",
+)
 ENV_CHAT_FILE_HOSTS = "LXW_MCP_CHAT_FILE_HOSTS"
 CHAT_FILE_TIMEOUT = 30.0
 CHAT_FILE_MAX_REDIRECTS = 3
@@ -1520,6 +1537,12 @@ def create_quotation_draft(body: dict[str, Any]) -> dict[str, Any]:
     Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
     Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
     max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
+
+    Defaults when omitted: `voucherDate` today (plain dates like 2026-11-04
+    are fine), `totalPrice` EUR, `taxConditions.taxType` net, line item
+    `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
+    days. Line item type `custom` = free position with name and unitPrice;
+    `material`/`service` only with the article's `id`.
     """
     return services.create_quotation(_client_get(), body)
 
@@ -1536,6 +1559,12 @@ def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
     Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
     Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
     max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
+
+    Defaults when omitted: `voucherDate` today (plain dates like 2026-11-04
+    are fine), `totalPrice` EUR, `taxConditions.taxType` net, line item
+    `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
+    days. Line item type `custom` = free position with name and unitPrice;
+    `material`/`service` only with the article's `id`.
     """
     return services.create_order_confirmation(_client_get(), body)
 
@@ -1590,6 +1619,12 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
     Einleitungstext `introduction` und Schlusstext `remark` je max. 2000;
     Positionsbezeichnung `name` max. 100; Positionsbeschreibung `description`
     max. 2000. Bei Überschreitung bitte kürzen (der Server meldet es sonst).
+
+    Defaults when omitted: `voucherDate` today (plain dates like 2026-11-04
+    are fine), `totalPrice` EUR, `taxConditions.taxType` net, line item
+    `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
+    days. Line item type `custom` = free position with name and unitPrice;
+    `material`/`service` only with the article's `id`.
     """
     return services.create_delivery_note(_client_get(), body)
 
