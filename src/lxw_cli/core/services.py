@@ -24,6 +24,15 @@ from lxw_cli.core.constants import (
 from lxw_cli.core.errors import LexwareAPIError, LexwareError
 from lxw_cli.core.limits import validate_article, validate_contact, validate_voucher
 from lxw_cli.core.models import ListResult
+from lxw_cli.core.prepare import (
+    DELIVERY_NOTE,
+    INVOICE,
+    ORDER_CONFIRMATION,
+    QUOTATION,
+    issue_keys,
+    prepare_document,
+    prepare_voucher,
+)
 
 if TYPE_CHECKING:
     from lxw_cli.core.client import LexwareClient
@@ -356,6 +365,7 @@ def download_invoice_pdf(client: LexwareClient, identifier: str) -> bytes:
 
 
 def create_invoice(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    body = prepare_document(client, body, INVOICE)
     validate_voucher(body)
     return client.post("/v1/invoices", body)
 
@@ -413,9 +423,23 @@ def get_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
     return client.get(f"/v1/vouchers/{voucher_id}")
 
 
+# Lexware refuses a delivery date on some voucher types (e.g. purchase
+# invoices) — the date carries no information there, so it is dropped.
+_NO_SHIPPING_DATE = "expected_no_shipping_date_for_given_voucher_type"
+
+
 def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    body = prepare_voucher(body)
     validate_voucher(body)
-    return client.post("/v1/vouchers", body)
+    try:
+        return client.post("/v1/vouchers", body)
+    except LexwareAPIError as exc:
+        if not (isinstance(body, dict) and body.get("shippingDate")):
+            raise
+        if _NO_SHIPPING_DATE not in issue_keys(exc):
+            raise
+        retry = {k: v for k, v in body.items() if k != "shippingDate"}
+        return client.post("/v1/vouchers", retry)
 
 
 # -- Beleg-Anhänge (voucher file attachments) -------------------------------
@@ -641,6 +665,7 @@ def download_quotation_pdf(client: LexwareClient, identifier: str) -> bytes:
 
 
 def create_quotation(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    body = prepare_document(client, body, QUOTATION)
     validate_voucher(body)
     return client.post("/v1/quotations", body)
 
@@ -685,6 +710,7 @@ def download_order_confirmation_pdf(client: LexwareClient, identifier: str) -> b
 def create_order_confirmation(
     client: LexwareClient, body: dict[str, Any]
 ) -> dict[str, Any]:
+    body = prepare_document(client, body, ORDER_CONFIRMATION)
     validate_voucher(body)
     return client.post("/v1/order-confirmations", body)
 
@@ -792,6 +818,7 @@ def download_delivery_note_pdf(client: LexwareClient, identifier: str) -> bytes:
 def create_delivery_note(
     client: LexwareClient, body: dict[str, Any]
 ) -> dict[str, Any]:
+    body = prepare_document(client, body, DELIVERY_NOTE)
     validate_voucher(body)
     return client.post("/v1/delivery-notes", body)
 

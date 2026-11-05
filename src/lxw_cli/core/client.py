@@ -210,7 +210,17 @@ class LexwareClient:
         params["size"] = min(max(page_size, PAGE_SIZE_MIN), PAGE_SIZE_MAX)
         while True:
             params["page"] = page
-            payload = self.get(path, params=params)
+            try:
+                payload = self.get(path, params=params)
+            except LexwareAPIError as exc:
+                # Lexware caps how deep a list can be paged ("Maximum search
+                # window size exceeded", HTTP 400). Stop there and keep what
+                # was fetched instead of failing the whole request.
+                if page == 0 or exc.status_code != 400 or not _is_window_limit(exc):
+                    raise
+                if meta is not None:
+                    meta["truncated"] = True
+                return
             if meta is not None and "total" not in meta:
                 total = payload.get("totalElements")
                 if total is not None:
@@ -223,6 +233,13 @@ class LexwareClient:
             if payload.get("last", True):
                 return
             page += 1
+
+
+_WINDOW_LIMIT_RE = re.compile(r"(maximum search window|Suchfenster)", re.I)
+
+
+def _is_window_limit(exc: LexwareAPIError) -> bool:
+    return bool(_WINDOW_LIMIT_RE.search(str(exc)) or _WINDOW_LIMIT_RE.search(str(exc.body)))
 
 
 def _filename_from_disposition(response: httpx.Response) -> str | None:
@@ -279,6 +296,13 @@ _KNOWN_MESSAGES = (
         re.compile(r"voucherStatus filter 'overdue' cannot be used in combination", re.I),
         "Der Status „überfällig“ kann bei Lexware nicht zusammen mit anderen "
         "Status abgefragt werden. Bitte überfällige Belege separat abfragen.",
+    ),
+    (
+        # HTTP 400 when a list is paged too deep (Lexware's search window).
+        re.compile(r"Maximum search window size exceeded", re.I),
+        "Die Liste ist zu groß, um sie so weit durchzublättern (Lexware-"
+        "Suchfenster). Bitte enger filtern, z. B. nach Status, Kontakt oder "
+        "Belegnummer, oder weniger Einträge abrufen.",
     ),
     (
         # HTTP 409 on a PDF download: "the sales voucher with id … and voucher
