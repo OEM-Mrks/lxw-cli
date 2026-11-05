@@ -978,7 +978,7 @@ def list_articles(
         title, description and article number — use this to find an article by
         name/Bezeichnung or a partial number (the API itself only filters by
         exact article_number/gtin). Done client-side over all articles.
-    article_type: 'product' or 'service'.
+    article_type: 'product' or 'service' (any case).
     article_number: exact article number (server-side, fast).
     Set limit=0 to fetch all articles (paginates internally).
     """

@@ -832,3 +832,29 @@ def test_get_contact_checks_id_before_request(client: LexwareClient) -> None:
     with pytest.raises(LexwareError, match="Ungültige Kontakt-ID"):
         services.update_contact(client, "8c026ea9", {"note": "x"})
     assert not route.called
+
+
+@pytest.mark.parametrize(
+    ("given", "sent"),
+    [
+        ("service", "SERVICE"),
+        ("Product", "PRODUCT"),
+        ("Dienstleistung", "SERVICE"),
+        ("SERVICE", "SERVICE"),
+    ],
+)
+@respx.mock
+def test_list_articles_type_sent_in_capitals(client: LexwareClient, given: str, sent: str) -> None:
+    """Lexware nimmt nur PRODUCT/SERVICE, sonst HTTP 406 (Karl Funke, 03.11.2026)."""
+    route = respx.get(_ARTICLES).mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    services.list_articles(client, article_type=given)
+    assert route.calls.last.request.url.params["type"] == sent
+    services.list_articles(client, article_type=given, search="x")
+    assert route.calls.last.request.url.params["type"] == sent
+
+
+def test_list_articles_unknown_type_explained(client: LexwareClient) -> None:
+    with pytest.raises(LexwareError, match="Ungültige Artikelart"):
+        services.list_articles(client, article_type="hardware")

@@ -182,6 +182,7 @@ def search_articles(
     stops early once `max_items` matches are collected.
     """
     needle = search.casefold()
+    article_type = normalize_article_type(article_type)
     results: list[dict[str, Any]] = []
     for item in client.paginate(
         "/v1/articles", params={"type": article_type, "gtin": gtin}
@@ -191,6 +192,39 @@ def search_articles(
             if max_items is not None and len(results) >= max_items:
                 break
     return results
+
+
+# Lexware's article filter only accepts PRODUCT/SERVICE in capitals and answers
+# anything else with a bare HTTP 406. Callers (and our own docs) say
+# "product"/"service"; German words are common too.
+_ARTICLE_TYPES = {
+    "product": "PRODUCT",
+    "produkt": "PRODUCT",
+    "produkte": "PRODUCT",
+    "ware": "PRODUCT",
+    "waren": "PRODUCT",
+    "material": "PRODUCT",
+    "artikel": "PRODUCT",
+    "service": "SERVICE",
+    "services": "SERVICE",
+    "dienstleistung": "SERVICE",
+    "dienstleistungen": "SERVICE",
+    "leistung": "SERVICE",
+    "leistungen": "SERVICE",
+}
+
+
+def normalize_article_type(article_type: str | None) -> str | None:
+    """Map an article type filter to Lexware's PRODUCT/SERVICE (None/"" → None)."""
+    if article_type is None or not str(article_type).strip():
+        return None
+    value = str(article_type).strip().casefold()
+    if value in _ARTICLE_TYPES:
+        return _ARTICLE_TYPES[value]
+    raise LexwareError(
+        f"Ungültige Artikelart '{article_type}'. Gültig sind 'product' "
+        "(Produkt/Ware) und 'service' (Dienstleistung)."
+    )
 
 
 def _article_matches(article: dict[str, Any], needle_casefolded: str) -> bool:
@@ -1296,6 +1330,7 @@ def list_articles(
 ) -> ListResult:
     """List articles, or free-text search them client-side when `search` is set."""
     max_items = resolve_max_items(limit, fetch_all)
+    article_type = normalize_article_type(article_type)
     if search:
         items = search_articles(
             client,
