@@ -97,9 +97,20 @@ def resolve_voucher_id(
     /v1/voucherlist with the given `voucher_type` filter. Raises
     LexwareError on no match or ambiguous matches.
     """
+    return resolve_voucher(client, identifier, voucher_type)[0]
+
+
+def resolve_voucher(
+    client: LexwareClient, identifier: str, voucher_type: str
+) -> tuple[str, str | None]:
+    """Like :func:`resolve_voucher_id`, but also return the voucherlist type.
+
+    The type is only known when `identifier` is a voucher number (the
+    voucherlist row carries it); for a UUID it is ``None``.
+    """
     identifier = identifier.strip()
     if looks_like_uuid(identifier):
-        return identifier
+        return identifier, None
     matches = list(
         client.paginate(
             "/v1/voucherlist",
@@ -122,7 +133,54 @@ def resolve_voucher_id(
             f"Mehrere Belege mit Nummer '{identifier}' gefunden — "
             "bitte die UUID direkt angeben."
         )
-    return matches[0]["id"]
+    return matches[0]["id"], matches[0].get("voucherType")
+
+
+# Where Lexware serves a voucher's details, by voucherlist type. Bookkeeping
+# vouchers (sales*/purchase*) live under /v1/vouchers; documents written in
+# Lexware's invoicing part each have their own endpoint — an id from the
+# voucherlist answers 404 everywhere else. Order = probing order for a bare
+# UUID (most common first).
+_DETAIL_PATHS: dict[str, str] = {
+    "invoice": "/v1/invoices/{id}",
+    "salesinvoice": "/v1/vouchers/{id}",
+    "downpaymentinvoice": "/v1/down-payment-invoices/{id}",
+    "salescreditnote": "/v1/vouchers/{id}",
+    "purchaseinvoice": "/v1/vouchers/{id}",
+    "purchasecreditnote": "/v1/vouchers/{id}",
+    "creditnote": "/v1/credit-notes/{id}",
+    "quotation": "/v1/quotations/{id}",
+    "orderconfirmation": "/v1/order-confirmations/{id}",
+    "deliverynote": "/v1/delivery-notes/{id}",
+}
+
+
+def get_voucher_details(
+    client: LexwareClient, identifier: str, voucher_type: str
+) -> dict[str, Any]:
+    """Fetch a voucher's details from whichever endpoint holds its type.
+
+    `voucher_type` is the comma-separated voucherlist filter (e.g.
+    INVOICE_LIKE_TYPES). A voucher number tells us the type, so its endpoint
+    is asked first; a UUID is probed against the endpoints of every allowed
+    type until one answers. Only 404 moves on to the next endpoint.
+    """
+    voucher_id, found_type = resolve_voucher(client, identifier, voucher_type)
+    allowed = [t.strip() for t in voucher_type.split(",")]
+    paths = [p for t, p in _DETAIL_PATHS.items() if t in allowed]
+    if found_type in _DETAIL_PATHS:
+        paths.insert(0, _DETAIL_PATHS[found_type])
+    for path in dict.fromkeys(paths):
+        try:
+            return client.get(path.format(id=voucher_id))
+        except LexwareAPIError as exc:
+            if exc.status_code != 404:
+                raise
+    raise LexwareError(
+        f"Beleg '{identifier.strip()}' wurde in Lexware nicht gefunden "
+        "(weder als Rechnung, Abschlagsrechnung, Gutschrift, Angebot, Auftrag, "
+        "Lieferschein noch als Buchhaltungsbeleg). Bitte Nummer oder ID prüfen."
+    )
 
 
 def get_with_voucher_fallback(client: LexwareClient, primary_path: str) -> Any:
@@ -387,15 +445,46 @@ def list_invoices(
 
 
 def get_invoice(client: LexwareClient, identifier: str) -> dict[str, Any]:
-    invoice_id = resolve_voucher_id(client, identifier, INVOICE_LIKE_TYPES)
-    return get_with_voucher_fallback(client, f"/v1/invoices/{invoice_id}")
+    """Invoice details — also for bookkeeping sales invoices and down payment
+    invoices (Abschlagsrechnungen), which the invoice list includes."""
+    return get_voucher_details(client, identifier, INVOICE_LIKE_TYPES)
 
 
 def download_invoice_pdf(client: LexwareClient, identifier: str) -> bytes:
-    invoice_id = resolve_voucher_id(client, identifier, INVOICE_LIKE_TYPES)
-    return get_pdf_with_voucher_fallback(
-        client, f"/v1/invoices/{invoice_id}/file", invoice_id
-    )
+    invoice_id, found_type = resolve_voucher(client, identifier, INVOICE_LIKE_TYPES)
+    if found_type == "downpaymentinvoice":
+        return _down_payment_invoice_pdf(client, invoice_id)
+    try:
+        return get_pdf_with_voucher_fallback(
+            client, f"/v1/invoices/{invoice_id}/file", invoice_id
+        )
+    except LexwareAPIError as exc:
+        # A bare UUID of an Abschlagsrechnung is unknown to both endpoints.
+        if exc.status_code != 404 or found_type is not None:
+            raise
+        return _down_payment_invoice_pdf(client, invoice_id)
+
+
+def _down_payment_invoice_pdf(client: LexwareClient, invoice_id: str) -> bytes:
+    """PDF of a down payment invoice (Abschlagsrechnung).
+
+    Prefers ``/v1/down-payment-invoices/{id}/file``; on 404 falls back to the
+    older render route ``…/document``, whose ``documentFileId`` is then
+    downloaded from ``/v1/files/{fileId}``.
+    """
+    base = f"/v1/down-payment-invoices/{invoice_id}"
+    try:
+        return client.get_binary(f"{base}/file")
+    except LexwareAPIError as exc:
+        if exc.status_code != 404:
+            raise
+        rendered = client.get(f"{base}/document")
+        file_id = rendered.get("documentFileId") if isinstance(rendered, dict) else None
+        if not file_id:
+            raise LexwareAPIError(
+                404, f"Kein PDF für Abschlagsrechnung {invoice_id} verfügbar."
+            ) from exc
+        return client.get_binary(f"/v1/files/{file_id}")
 
 
 def create_invoice(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
@@ -453,6 +542,13 @@ def normalize_voucher_type(voucher_type: str) -> str:
 
 
 def get_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
+    """Any voucher's details — bookkeeping vouchers as well as invoices, down
+    payment invoices, credit notes, quotations, orders and delivery notes."""
+    return get_voucher_details(client, identifier, ALL_VOUCHER_TYPES)
+
+
+def get_bookkeeping_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
+    """A bookkeeping voucher from /v1/vouchers only (e.g. to attach files)."""
     voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
     return client.get(f"/v1/vouchers/{voucher_id}")
 

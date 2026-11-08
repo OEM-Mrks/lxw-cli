@@ -858,3 +858,140 @@ def test_list_articles_type_sent_in_capitals(client: LexwareClient, given: str, 
 def test_list_articles_unknown_type_explained(client: LexwareClient) -> None:
     with pytest.raises(LexwareError, match="Ungültige Artikelart"):
         services.list_articles(client, article_type="hardware")
+
+
+# -- Abschlagsrechnungen / Belege aller Arten (v0.9.10) ----------------------
+
+_API = "https://api.lexware.io/v1"
+
+
+def _not_found() -> httpx.Response:
+    return httpx.Response(404, json={"message": "not found"})
+
+
+@respx.mock
+def test_get_invoice_down_payment_by_number_goes_straight(client: LexwareClient) -> None:
+    respx.get(_VOUCHERLIST, params={"voucherNumber": "RE0007"}).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "content": [{"id": _UUID, "voucherType": "downpaymentinvoice"}],
+                "last": True,
+            },
+        )
+    )
+    invoices = respx.get(f"{_API}/invoices/{_UUID}").mock(return_value=_not_found())
+    route = respx.get(f"{_API}/down-payment-invoices/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID, "voucherNumber": "RE0007"})
+    )
+    assert services.get_invoice(client, "RE0007")["voucherNumber"] == "RE0007"
+    assert route.called
+    assert not invoices.called
+
+
+@respx.mock
+def test_get_invoice_down_payment_by_uuid_probes(client: LexwareClient) -> None:
+    respx.get(f"{_API}/invoices/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/vouchers/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/down-payment-invoices/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID})
+    )
+    assert services.get_invoice(client, _UUID) == {"id": _UUID}
+
+
+@respx.mock
+def test_get_invoice_bookkeeping_sales_invoice_still_works(client: LexwareClient) -> None:
+    respx.get(f"{_API}/invoices/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/vouchers/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID, "type": "salesinvoice"})
+    )
+    down = respx.get(f"{_API}/down-payment-invoices/{_UUID}")
+    assert services.get_invoice(client, _UUID)["type"] == "salesinvoice"
+    assert not down.called
+
+
+@respx.mock
+def test_get_invoice_not_found_anywhere_is_clear(client: LexwareClient) -> None:
+    respx.get(f"{_API}/invoices/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/vouchers/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/down-payment-invoices/{_UUID}").mock(return_value=_not_found())
+    with pytest.raises(LexwareError, match="nicht gefunden"):
+        services.get_invoice(client, _UUID)
+
+
+@respx.mock
+def test_get_invoice_other_errors_are_not_swallowed(client: LexwareClient) -> None:
+    respx.get(f"{_API}/invoices/{_UUID}").mock(
+        return_value=httpx.Response(403, json={"message": "forbidden"})
+    )
+    with pytest.raises(LexwareError, match="403"):
+        services.get_invoice(client, _UUID)
+
+
+@respx.mock
+def test_get_voucher_finds_regular_invoice(client: LexwareClient) -> None:
+    respx.get(_VOUCHERLIST, params={"voucherNumber": "RE0006"}).mock(
+        return_value=httpx.Response(
+            200, json={"content": [{"id": _UUID, "voucherType": "invoice"}], "last": True}
+        )
+    )
+    vouchers = respx.get(f"{_API}/vouchers/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/invoices/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID, "voucherNumber": "RE0006"})
+    )
+    assert services.get_voucher(client, "RE0006")["voucherNumber"] == "RE0006"
+    assert not vouchers.called
+
+
+@respx.mock
+def test_get_voucher_uuid_of_quotation(client: LexwareClient) -> None:
+    for path in ("invoices", "vouchers", "down-payment-invoices", "credit-notes"):
+        respx.get(f"{_API}/{path}/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/quotations/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID, "voucherNumber": "AG1"})
+    )
+    assert services.get_voucher(client, _UUID)["voucherNumber"] == "AG1"
+
+
+@respx.mock
+def test_get_bookkeeping_voucher_only_asks_vouchers(client: LexwareClient) -> None:
+    route = respx.get(f"{_API}/vouchers/{_UUID}").mock(
+        return_value=httpx.Response(200, json={"id": _UUID})
+    )
+    assert services.get_bookkeeping_voucher(client, _UUID) == {"id": _UUID}
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_download_down_payment_pdf_by_number(client: LexwareClient) -> None:
+    respx.get(_VOUCHERLIST, params={"voucherNumber": "RE0007"}).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "content": [{"id": _UUID, "voucherType": "downpaymentinvoice"}],
+                "last": True,
+            },
+        )
+    )
+    respx.get(f"{_API}/down-payment-invoices/{_UUID}/file").mock(
+        return_value=httpx.Response(200, content=b"%PDF-abschlag")
+    )
+    assert services.download_invoice_pdf(client, "RE0007") == b"%PDF-abschlag"
+
+
+@respx.mock
+def test_download_down_payment_pdf_by_uuid_falls_back_to_document(
+    client: LexwareClient,
+) -> None:
+    respx.get(f"{_API}/invoices/{_UUID}/file").mock(return_value=_not_found())
+    respx.get(f"{_API}/vouchers/{_UUID}").mock(return_value=_not_found())
+    respx.get(f"{_API}/down-payment-invoices/{_UUID}/file").mock(
+        return_value=_not_found()
+    )
+    respx.get(f"{_API}/down-payment-invoices/{_UUID}/document").mock(
+        return_value=httpx.Response(200, json={"documentFileId": "file-9"})
+    )
+    respx.get(f"{_API}/files/file-9").mock(
+        return_value=httpx.Response(200, content=b"%PDF-render")
+    )
+    assert services.download_invoice_pdf(client, _UUID) == b"%PDF-render"
