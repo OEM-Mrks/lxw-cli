@@ -837,6 +837,9 @@ def list_invoices(
 def get_invoice(identifier: str) -> dict[str, Any]:
     """Get invoice details by UUID or invoice number (e.g. 'FB2600682').
 
+    Works for every entry of the invoice list, including down payment
+    invoices (Abschlagsrechnungen).
+
     The only parameter is `identifier` (invoice number or id) — there is no
     `invoice_id`, `id` or `number` parameter.
     """
@@ -939,7 +942,9 @@ def list_vouchers(
 
 @mcp.tool
 def get_voucher(identifier: str) -> dict[str, Any]:
-    """Get a voucher's details by UUID or voucher number. Searches all voucher types.
+    """Get a voucher's details by UUID or voucher number. Searches all voucher types
+    (bookkeeping vouchers, invoices, down payment invoices, credit notes,
+    quotations, order confirmations, delivery notes).
 
     The only parameter is `identifier` (voucher number or id) — there is no
     `voucher_id`, `id` or `number` parameter.
@@ -1347,7 +1352,7 @@ def create_upload_link(identifier: str) -> dict[str, Any]:
             "Upload-Links gibt es nur über die Online-Verbindung — lokal die "
             "Datei bitte mit file_path anhängen."
         )
-    voucher = services.get_voucher(_client_get(), identifier)
+    voucher = services.get_bookkeeping_voucher(_client_get(), identifier)
     return {
         "voucherId": voucher["id"],
         "voucherNumber": voucher.get("voucherNumber"),
