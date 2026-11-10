@@ -181,7 +181,7 @@ def test_non_2xx_raises(client: LexwareClient) -> None:
     with pytest.raises(LexwareAPIError) as excinfo:
         client.get("/v1/invoices/xxx")
     assert excinfo.value.status_code == 404
-    assert "not found" in str(excinfo.value)
+    assert "Nicht gefunden" in str(excinfo.value)
 
 
 @respx.mock

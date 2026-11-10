@@ -581,9 +581,9 @@ async def test_invalid_voucher_type_reaches_the_caller_in_german() -> None:
     async with Client(mcp) as c:
         with pytest.raises(ToolError) as excinfo:
             await c.call_tool(
-                "list_vouchers", {"voucher_type": "purchaseinvoice,voucher"}
+                "list_vouchers", {"voucher_type": "purchaseinvoice,kuchen"}
             )
-    assert "Ungültiger Belegtyp 'voucher'" in str(excinfo.value)
+    assert "Ungültiger Belegtyp 'kuchen'" in str(excinfo.value)
 
 
 @respx.mock
@@ -596,7 +596,7 @@ async def test_list_quotations_accepts_number_and_contact() -> None:
         await c.call_tool(
             "list_quotations", {"voucher_number": "AG1", "contact_id": _ART_UUID}
         )
-    params = route.calls.last.request.url.params
+    params = route.calls[0].request.url.params
     assert params["voucherNumber"] == "AG1"
     assert params["contactId"] == _ART_UUID
 
@@ -658,7 +658,7 @@ async def test_list_articles_accepts_article_number_in_lexware_spelling() -> Non
     )
     async with Client(mcp) as c:
         await c.call_tool("list_articles", {"articleNumber": "10042"})
-    assert route.calls.last.request.url.params["articleNumber"] == "10042"
+    assert route.calls[0].request.url.params["articleNumber"] == "10042"
 
 
 @respx.mock

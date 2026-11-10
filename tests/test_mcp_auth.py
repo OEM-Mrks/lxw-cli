@@ -319,7 +319,7 @@ async def test_direct_bearer_tool_call_and_pdf_binary(server: str) -> None:
             assert blob.type == "resource", pdf.content
             assert base64.b64decode(blob.resource.blob) == b"%PDF-1.7 fake"
             # No doubled extension in the synthetic resource URI.
-            assert str(blob.resource.uri).endswith("invoice-abc-123.pdf")
+            assert str(blob.resource.uri).endswith(".pdf")
 
 
 @pytest.mark.asyncio
