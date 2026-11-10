@@ -213,7 +213,15 @@ _DOC_FIELDS = frozenset({
     "paymentConditions", "shippingConditions", "relatedVouchers", "printLayoutId",
     "introduction", "remark", "title", "files", "electronicDocumentProfile",
     "closingInvoice", "deliveryTerms", "xRechnung", "deliveryDate", "dueDate",
-    "nextReminderDate", "eInvoiceProfile", "hinweis",
+    "nextReminderDate", "eInvoiceProfile",
+})
+# What a GET returns but a create does not take — dropped silently, so a
+# document read with get_* can be sent back as a copy ("wie RE0016").
+_READ_ONLY_FIELDS = frozenset({
+    "id", "organizationId", "createdDate", "updatedDate", "version", "voucherStatus",
+    "voucherNumber", "taxAmounts", "relatedVouchers", "files", "archived",
+    "claimedGrossAmount", "downPaymentDeductions", "recurringTemplateId",
+    "closingInvoice", "hinweis", "Hinweis", "nextReminderDate",
 })
 _LINE_FIELDS = frozenset({
     "id", "type", "name", "description", "quantity", "unitName", "unitPrice",
@@ -223,7 +231,7 @@ _DISCOUNT_KEYS = ("rabatt_prozent", "rabattProzent", "gesamtrabatt", "rabatt",
                   "discount", "discountPercentage", "totalDiscountPercentage")
 _CUSTOMER_KEYS = ("customer", "kunde", "kunde_name", "kundenname", "customerName",
                   "customer_name", "empfaenger", "empfänger", "recipient")
-_ZIP_RE = re.compile(r"\b(\d{5})\s+([^,]+)$")
+_ZIP_RE = re.compile(r"\b(\d{4,5})\s+([^,]+)$")
 _CONTACT_KEYS = ("contactId", "customerId", "contact_id", "customer_id", "kundeId")
 _LINE_ALIASES = {
     "title": "name", "bezeichnung": "name", "text": "name", "artikel_name": "name",
@@ -373,7 +381,7 @@ def _due_and_delivery(out: dict[str, Any], kind: str) -> None:
             block["paymentTermLabel"] = "Zahlbar sofort, rein netto" if n == 0 else (
                 f"Zahlbar innerhalb von {n} Tagen ohne Abzug"
             )
-    if due and kind == INVOICE:
+    if due and kind != DELIVERY_NOTE:
         start = _day_of(out.get("voucherDate"))
         end = _day_of(document_timestamp(due))
         if start and end and end >= start:
@@ -404,12 +412,21 @@ def _due_and_delivery(out: dict[str, Any], kind: str) -> None:
             }
 
 
-def prepare_changes(changes: dict[str, Any], kind: str, tax_type: str) -> dict[str, Any]:
-    """Normalize adjustments for a follow-up document (continue_document)."""
+def prepare_changes(
+    changes: dict[str, Any], kind: str, tax_type: str, base_date: str | None = None
+) -> dict[str, Any]:
+    """Normalize adjustments for a follow-up document (continue_document).
+
+    `base_date` is the follow-up's voucherDate, needed to turn a due date
+    into a payment term when the changes don't set a date themselves.
+    """
     out = strip_control(copy.deepcopy(changes))
     _apply_aliases(out)
+    own_date = bool(out.get("voucherDate"))
     if out.get("voucherDate"):
         out["voucherDate"] = document_timestamp(out["voucherDate"])
+    elif base_date:
+        out["voucherDate"] = base_date
     if isinstance(out.get("lineItems"), (list, dict)):
         items = out["lineItems"] if isinstance(out["lineItems"], list) else [out["lineItems"]]
         out["lineItems"] = [
@@ -425,7 +442,15 @@ def prepare_changes(changes: dict[str, Any], kind: str, tax_type: str) -> dict[s
                     price.setdefault("currency", "EUR")
                     price.setdefault("taxRatePercentage", DEFAULT_TAX_RATE)
     known = kind in (INVOICE, ORDER_CONFIRMATION, DELIVERY_NOTE)
+    due = out.get("dueDate")
     _due_and_delivery(out, kind if known else INVOICE)
+    if due and "paymentConditions" not in out and kind != DELIVERY_NOTE:
+        raise LexwareError(
+            f"Die Fälligkeit '{due}' passt nicht zum Belegdatum – bitte ein späteres Datum "
+            "oder ein Zahlungsziel in Tagen (zahlungsziel) angeben."
+        )
+    if not own_date:
+        out.pop("voucherDate", None)
     ship = out.get("shippingConditions")
     if isinstance(ship, dict):
         for key in ("shippingDate", "shippingEndDate"):
@@ -438,6 +463,17 @@ def prepare_changes(changes: dict[str, Any], kind: str, tax_type: str) -> dict[s
 def _check_fields(out: dict[str, Any]) -> None:
     """Unknown fields raise — Lexware would drop them silently (e.g. a
     validity date under a made-up name) and the document comes out wrong."""
+    for key in _READ_ONLY_FIELDS & set(out):
+        out.pop(key)
+    for item in out.get("lineItems") or []:
+        if isinstance(item, dict):
+            item.pop("lineItemAmount", None)
+            price = item.get("unitPrice")
+            if isinstance(price, dict) and "amount" in price:
+                raise LexwareError(
+                    "Preis einer Position unklar – bitte unitPrice.netAmount (netto) oder "
+                    "unitPrice.grossAmount (brutto) angeben."
+                )
     unknown = sorted(k for k in out if k not in _DOC_FIELDS)
     if unknown:
         raise LexwareError(
@@ -474,11 +510,27 @@ def _day_of(value: Any) -> date | None:
         return None
 
 
+def _first(out: dict[str, Any], *keys: str) -> Any:
+    """Pop the first present key (also when its value is 0) and drop the rest."""
+    found = None
+    for key in keys:
+        if key in out:
+            value = out.pop(key)
+            if found is None and value is not None and value != "":
+                found = value
+    return found
+
+
 def _round(value: Any, places: int) -> Any:
     """Lexware takes at most 4 (prices, quantity) resp. 2 (discount) decimals."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) >= 1e12:
+        raise LexwareError(f"Die Zahl {value:g} ist zu groß für Lexware.")
     if isinstance(value, float):
-        rounded = float(Decimal(str(value)).quantize(Decimal(1).scaleb(-places),
-                                                     rounding=ROUND_HALF_UP))
+        try:
+            rounded = float(Decimal(str(value)).quantize(Decimal(1).scaleb(-places),
+                                                         rounding=ROUND_HALF_UP))
+        except InvalidOperation as exc:
+            raise LexwareError(f"Die Zahl {value!r} ist zu groß.") from exc
         return int(rounded) if rounded.is_integer() else rounded
     return value
 
@@ -517,7 +569,7 @@ def _normalize_line(item: dict[str, Any], tax_type: str) -> dict[str, Any]:
     for alias, target in list(_LINE_PRICE_KEYS.items()):
         if alias in price and alias != target:
             price.setdefault(target, price.pop(alias))
-    if "amount" in price and tax_type in ("gross", "net", "vatfree"):
+    if "amount" in price and tax_type != "?":
         amount = price.pop("amount")
         key = "grossAmount" if tax_type == "gross" else "netAmount"
         price.setdefault(key, amount)
@@ -846,10 +898,8 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
         if alias in out and "contactName" not in out and "contactId" not in out:
             out["contactName"] = out.pop(alias)
     # a receipt with one amount: build the single item
-    category = (out.pop("kategorie", None) or out.pop("category", None)
-                or out.pop("categoryId", None))
-    rate = (out.pop("taxRatePercent", None) or out.pop("steuersatz", None)
-            or out.pop("taxRate", None))
+    category = _first(out, "kategorie", "category", "categoryId")
+    rate = _first(out, "taxRatePercent", "steuersatz", "taxRate")  # 0 is a valid rate
     if not out.get("voucherItems") and out.get("totalGrossAmount") is not None and category:
         out["voucherItems"] = [{
             "amount": out["totalGrossAmount"],

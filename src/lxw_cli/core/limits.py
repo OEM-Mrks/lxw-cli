@@ -42,8 +42,7 @@ def _check(
 ) -> None:
     """Record a violation when ``value`` is a string longer than ``maximum``."""
     if isinstance(value, str) and lexware_length(value) > maximum:
-        extra = " – & < > zählen bei Lexware als 4–5 Zeichen" if any(
-            c in value for c in "&<>") else ""
+        extra = ""
         violations.append(
             f"{label} darf höchstens {maximum} Zeichen haben "
             f"(aktuell {lexware_length(value)}{extra})."
@@ -51,10 +50,10 @@ def _check(
 
 
 def lexware_length(value: str) -> int:
-    """Length as Lexware counts it: stored HTML-escaped, in UTF-16 units
-    (an emoji counts twice)."""
-    stored = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return len(stored.encode("utf-16-le")) // 2
+    """Length as Lexware counts it: UTF-16 units (an emoji counts twice).
+    (HTML escaping of & < > is only proven for the document title — see
+    validate_voucher.)"""
+    return len(value.encode("utf-16-le")) // 2
 
 
 def _raise(violations: list[str]) -> None:

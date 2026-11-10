@@ -380,3 +380,113 @@ def test_prefixed_numbers_with_separator(client: LexwareClient) -> None:
     for text in ("ls 11", "Lieferschein LS0011", "LS-0011"):
         match = services.find_voucher(client, text, services.ALL_VOUCHER_TYPES)
         assert match.id == U1, text
+
+
+# -- Review 0.9.13 -------------------------------------------------------------
+
+
+def test_zero_tax_rate_kept_for_receipt() -> None:
+    out = prepare_voucher({"type": "purchaseinvoice", "voucherNumber": "1", "betrag": 5,
+                           "kategorie": "Porto", "taxRatePercent": 0})
+    assert out["voucherItems"][0]["taxRatePercent"] == 0
+    assert out["voucherItems"][0]["taxAmount"] == 0
+
+
+def test_price_alias_with_special_tax_type() -> None:
+    out = prepare_document(None, {"taxConditions": {"taxType": "intraCommunitySupply"},
+                                  "lineItems": [{"name": "A", "price": 100}]}, INVOICE)
+    assert out["lineItems"][0]["unitPrice"]["netAmount"] == 100
+
+
+def test_copy_of_read_document_is_accepted() -> None:
+    read = {"id": U1, "voucherNumber": "RE0016", "voucherStatus": "open", "version": 3,
+            "claimedGrossAmount": 1, "downPaymentDeductions": [], "taxAmounts": [],
+            "relatedVouchers": [], "hinweis": "x", "lineItems": [{**LINE, "lineItemAmount": 10}]}
+    out = prepare_document(None, read, INVOICE)
+    assert "claimedGrossAmount" not in out and "hinweis" not in out and "id" not in out
+    assert "lineItemAmount" not in out["lineItems"][0]
+
+
+@respx.mock
+def test_due_date_in_changes_becomes_payment_term(client: LexwareClient) -> None:
+    order = {**QUOTE, "id": U1, "voucherNumber": "AB0005", "voucherStatus": "open",
+             "createdDate": "2026-11-01T00:00:00.000+01:00"}
+    _source(order, "orderconfirmation", "order-confirmations")
+    post = respx.post(f"{API}/invoices").mock(return_value=httpx.Response(200, json={"id": U2}))
+    respx.get(f"{API}/invoices/{U2}").mock(return_value=httpx.Response(200, json={"id": U2}))
+    from datetime import date, timedelta
+
+    due = (date.today() + timedelta(days=20)).strftime("%d.%m.%Y")
+    services.continue_document(client, "AB0005", "Rechnung", changes={"zahlbar_bis": due})
+    body = json.loads(post.calls[0].request.content)
+    assert body["paymentConditions"]["paymentTermDuration"] in (19, 20, 21)
+
+
+@respx.mock
+def test_unknown_customer_name_becomes_one_off_address(client: LexwareClient) -> None:
+    respx.get(f"{API}/contacts").mock(return_value=page())
+    post = respx.post(f"{API}/quotations").mock(
+        return_value=httpx.Response(200, json={"id": U2})
+    )
+    result = services.create_quotation(client, {"kunde": "Max Mustermann", "lineItems": [LINE]})
+    assert json.loads(post.calls[0].request.content)["address"] == {
+        "name": "Max Mustermann", "countryCode": "DE"}
+    assert "Kundenstamm" in result["hinweis"]
+
+
+def test_austrian_postal_string() -> None:
+    out = prepare_document(None, {"kunde": "Huber GmbH, Ring 1, 1010 Wien",
+                                  "lineItems": [LINE]}, QUOTATION)
+    assert out["address"]["zip"] == "1010" and out["address"]["city"] == "Wien"
+
+
+@respx.mock
+def test_predecessor_is_not_a_duplicate(client: LexwareClient) -> None:
+    inv = {**QUOTE, "voucherNumber": "RE0050", "voucherStatus": "open",
+           "createdDate": "2026-11-10T10:00:00.000+01:00",
+           "relatedVouchers": [{"id": "ls1", "voucherNumber": "LS0001",
+                                "voucherType": "deliverynote"}]}
+    _source(inv, "invoice", "invoices")
+    respx.get(f"{API}/delivery-notes/ls1").mock(return_value=httpx.Response(200, json={
+        "id": "ls1", "createdDate": "2026-11-09T10:00:00.000+01:00", "voucherStatus": "open"}))
+    post = respx.post(f"{API}/delivery-notes").mock(
+        return_value=httpx.Response(200, json={"id": U2})
+    )
+    respx.get(f"{API}/delivery-notes/{U2}").mock(return_value=httpx.Response(200, json={}))
+    services.continue_document(client, "RE0050", "Lieferschein")
+    body = json.loads(post.calls[0].request.content)
+    assert post.called and "totalDiscountPercentage" not in body["totalPrice"]
+
+
+@respx.mock
+def test_mistyped_number_is_not_a_customer(client: LexwareClient) -> None:
+    respx.get(f"{API}/voucherlist").mock(return_value=page())
+    contacts = respx.get(f"{API}/contacts").mock(return_value=page({"id": U1}))
+    with pytest.raises(LexwareError, match="Kein Beleg"):
+        services.create_dunning(client, "RE10005")
+    assert not contacts.called
+
+
+@respx.mock
+def test_receipts_without_number_are_not_deduplicated(client: LexwareClient) -> None:
+    other = {"id": U2, "voucherNumber": "Kassenbon", "contactName": "Sammellieferant",
+             "totalAmount": 3.5, "voucherStatus": "open", "voucherType": "purchaseinvoice",
+             "voucherDate": "2026-11-10T00:00:00.000+01:00"}
+    respx.get(f"{API}/voucherlist").mock(return_value=page(other))
+    post = respx.post(f"{API}/vouchers").mock(return_value=httpx.Response(200, json={"id": U1}))
+    services.create_voucher(client, {
+        "type": "purchaseinvoice", "voucherNumber": "Kassenbon", "voucherDate": "2026-11-10",
+        "totalGrossAmount": 3.5, "taxType": "gross",
+        "voucherItems": [{"amount": 3.5, "taxRatePercent": 19, "categoryId": U1}]})
+    assert post.called
+
+
+def test_article_requires_tax_rate(client: LexwareClient) -> None:
+    with pytest.raises(LexwareError, match="Steuersatz"):
+        services.create_article(client, {"title": "A", "type": "SERVICE", "unitName": "Std",
+                                         "price": 19.9})
+
+
+def test_huge_number_is_a_clear_error() -> None:
+    with pytest.raises(LexwareError):
+        prepare_document(None, {"lineItems": [{**LINE, "quantity": 1.5e300}]}, QUOTATION)
