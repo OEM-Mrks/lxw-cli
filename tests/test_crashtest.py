@@ -292,7 +292,8 @@ def test_voucher_category_by_name_and_duplicate(client: LexwareClient) -> None:
         {"id": U2, "name": "Bürobedarf", "type": "outgo"},
     ]))
     existing = {"id": U3, "voucherNumber": "R-1", "contactId": U1, "totalAmount": 119,
-                "voucherStatus": "open"}
+                "voucherStatus": "open", "voucherType": "purchaseinvoice",
+                "voucherDate": "2026-11-10T00:00:00.000+01:00"}
     respx.get(f"{API}/voucherlist").mock(return_value=page(existing))
     post = respx.post(f"{API}/vouchers")
     result = services.create_voucher(client, {
@@ -302,8 +303,8 @@ def test_voucher_category_by_name_and_duplicate(client: LexwareClient) -> None:
     })
     assert not post.called and "nicht doppelt" in result["hinweis"]
     with pytest.raises(LexwareError, match="Buchungskategorie fehlt"):
-        services.create_voucher(client, {"type": "purchaseinvoice", "voucherItems": [
-            {"amount": 1, "taxRatePercent": 19}]})
+        services.create_voucher(client, {"type": "purchaseinvoice", "taxType": "gross",
+                                         "voucherItems": [{"amount": 1, "taxRatePercent": 19}]})
 
 
 @respx.mock
@@ -354,9 +355,9 @@ def test_download_file_by_voucher_number(client: LexwareClient) -> None:
 
 @respx.mock
 def test_dunning_by_invoice_number(client: LexwareClient) -> None:
-    respx.get(f"{API}/voucherlist").mock(
-        return_value=page({"id": U1, "voucherNumber": "RE0001", "voucherType": "invoice"})
-    )
+    respx.get(f"{API}/voucherlist").mock(side_effect=lambda r: page(
+        {"id": U1, "voucherNumber": "RE0001", "voucherType": "invoice"}
+    ) if r.url.params.get("voucherNumber") in ("RE0001", None) else page())
     respx.get(f"{API}/invoices/{U1}").mock(return_value=httpx.Response(200, json={
         "id": U1, "voucherNumber": "RE0001", "relatedVouchers": [
             {"id": U2, "voucherNumber": "RE0001_1", "voucherType": "dunning"},
@@ -416,3 +417,108 @@ def test_bare_404_is_german(client: LexwareClient) -> None:
     respx.get(f"{API}/profile").mock(return_value=httpx.Response(404, text="Not Found"))
     with pytest.raises(LexwareAPIError, match="Nicht gefunden"):
         client.get("/v1/profile")
+
+
+# -- Review-Befunde (unabhängiger Review 10.11.2026) ---------------------------
+
+
+def test_thousands_dot_never_guessed() -> None:
+    assert str(to_decimal("1.234.567", field="x")) == "1234567"
+    with pytest.raises(LexwareError, match="mehrdeutig"):
+        to_decimal("1.000", field="quantity")
+    assert str(to_decimal("0.500", field="x")) == "0.500"
+    assert str(to_decimal("1.000,50", field="x")) == "1000.50"
+
+
+def test_exact_status_value_not_widened() -> None:
+    assert normalize_voucher_status("paidoff") == "paidoff"
+    assert normalize_voucher_status("paid") == "paid"
+    assert normalize_voucher_status("bezahlt") == "paid,paidoff"
+
+
+@respx.mock
+def test_contact_by_name_needs_exact_match(client: LexwareClient) -> None:
+    other = {"id": U2, "company": {"name": "Schmidt & Söhne GmbH"}}
+    respx.get(f"{API}/contacts").mock(return_value=page(other))
+    with pytest.raises(LexwareError, match="Kein Kontakt heißt genau 'Schmidt'"):
+        services.resolve_contact_id(client, "Schmidt")
+    assert services.resolve_contact_id(client, "schmidt & soehne gmbh") == U2
+
+
+def test_hex_looking_names_are_not_ids() -> None:
+    with pytest.raises(LexwareError, match="Ungültige Kontakt-ID"):
+        services.resolve_contact_id(None, "8c026ea9")  # type: ignore[arg-type]
+
+
+@respx.mock
+def test_monthly_invoice_same_number_is_booked(client: LexwareClient) -> None:
+    january = {"id": U3, "voucherNumber": "LEAS-1", "contactId": U1, "totalAmount": 119,
+               "voucherStatus": "open", "voucherType": "purchaseinvoice",
+               "voucherDate": "2026-01-10T00:00:00.000+01:00"}
+    respx.get(f"{API}/voucherlist").mock(return_value=page(january))
+    post = respx.post(f"{API}/vouchers").mock(
+        return_value=httpx.Response(200, json={"id": U2})
+    )
+    result = services.create_voucher(client, {
+        "type": "purchaseinvoice", "voucherNumber": "LEAS-1", "contactId": U1,
+        "voucherDate": "2026-02-10", "totalGrossAmount": 119, "taxType": "gross",
+        "voucherItems": [{"amount": 119, "taxRatePercent": 19, "categoryId": U2}],
+    })
+    assert post.called and result["id"] == U2
+
+
+def test_voucher_tax_type_from_total() -> None:
+    items = [{"amount": 100, "taxRatePercent": 19, "categoryId": "x"}]
+    assert prepare_voucher({"voucherItems": items, "totalGrossAmount": 119})["taxType"] == "net"
+    assert prepare_voucher({"voucherItems": items, "totalGrossAmount": 100})["taxType"] == "gross"
+    with pytest.raises(LexwareError, match="taxType fehlt"):
+        prepare_voucher({"voucherItems": items})
+
+
+@respx.mock
+def test_number_fallback_respects_status(client: LexwareClient) -> None:
+    paid = {"id": U1, "voucherNumber": "RE0006", "voucherType": "invoice",
+            "voucherStatus": "paid"}
+    respx.get(f"{API}/voucherlist").mock(side_effect=lambda r: page(paid) if (
+        r.url.params.get("voucherNumber") == "RE0006"
+        and "open" not in r.url.params.get("voucherStatus", "").split(",")[:1]
+        and r.url.params.get("voucherStatus", "").startswith("draft")
+    ) else page())
+    assert services.list_invoices(client, number="RE0006", status="open").items == []
+
+
+@respx.mock
+def test_dunning_number_with_hyphen_invoice(client: LexwareClient) -> None:
+    respx.get(f"{API}/voucherlist").mock(side_effect=lambda r: page(
+        {"id": U1, "voucherNumber": "RE-2026-12", "voucherType": "invoice"}
+    ) if r.url.params.get("voucherNumber") == "RE-2026-12" else page())
+    respx.get(f"{API}/invoices/{U1}").mock(return_value=httpx.Response(200, json={
+        "id": U1, "voucherNumber": "RE-2026-12",
+        "relatedVouchers": [{"id": U2, "voucherNumber": "RE-2026-12_1",
+                             "voucherType": "dunning"}],
+    }))
+    respx.get(f"{API}/dunnings/{U2}").mock(return_value=httpx.Response(200, json={"id": U2}))
+    assert services.get_dunning(client, "RE-2026-12")["id"] == U2
+    with pytest.raises(LexwareError, match="RE-2026-12_5 gibt es nicht"):
+        services.get_dunning(client, "RE-2026-12_5")
+
+
+@respx.mock
+def test_partial_billing_address_keeps_other_fields(client: LexwareClient) -> None:
+    current = {"id": U1, "version": 2, "company": {"name": "A"}, "addresses": {"billing": [
+        {"street": "Weg 1", "zip": "50667", "city": "Köln", "countryCode": "DE"}]}}
+    respx.get(f"{API}/contacts/{U1}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{API}/contacts/{U1}").mock(return_value=httpx.Response(200, json={}))
+    services.update_contact(client, U1, {"city": "Bonn"})
+    billing = json.loads(put.calls[0].request.content)["addresses"]["billing"]
+    assert billing == [{"street": "Weg 1", "zip": "50667", "city": "Bonn", "countryCode": "DE"}]
+
+
+@respx.mock
+def test_pdf_refuses_silent_pick(client: LexwareClient) -> None:
+    respx.get(f"{API}/voucherlist").mock(return_value=page(
+        {"id": U1, "voucherNumber": "1001", "voucherType": "invoice"},
+        {"id": U2, "voucherNumber": "1001", "voucherType": "purchaseinvoice"},
+    ))
+    with pytest.raises(LexwareError, match="über seine id"):
+        services.download_pdf(client, "1001", services.ALL_VOUCHER_TYPES)

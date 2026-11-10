@@ -43,8 +43,6 @@ _STATUS_ALIASES: dict[str, tuple[str, ...]] = {
     "outstanding": ("open",),
     "bezahlt": ("paid", "paidoff"),
     "beglichen": ("paid", "paidoff"),
-    "paid": ("paid", "paidoff"),
-    "paidoff": ("paid", "paidoff"),
     "ausgeglichen": ("paidoff",),
     "balanced": ("paidoff",),
     "überfällig": ("overdue",),
@@ -188,6 +186,15 @@ def to_decimal(value: Any, *, field: str) -> Decimal | None:
             text = text.replace(",", "")
     elif "," in text:
         text = text.replace(",", ".")
+    elif re.fullmatch(r"-?[1-9]\d{0,2}(\.\d{3}){2,}", text):
+        text = text.replace(".", "")  # 1.234.567 – German thousands
+    elif re.fullmatch(r"-?[1-9]\d{0,2}\.\d{3}", text):
+        # "1.500" is 1500 in German but 1.5 in English — never guess
+        raise LexwareError(
+            f"„{field}“: '{value}' ist mehrdeutig (1.500 = tausendfünfhundert oder "
+            "eins Komma fünf?). Bitte als Zahl ohne Tausenderpunkt angeben, z. B. "
+            "1500 oder 1.5."
+        )
     try:
         return Decimal(text)
     except InvalidOperation as exc:

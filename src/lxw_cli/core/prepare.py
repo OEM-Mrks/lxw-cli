@@ -514,13 +514,16 @@ def _article_id_by_name(
 ) -> str | None:
     """Article id for an exact (ä = ae, any case) title — only if unique."""
     wanted = fold(name)
-    hits: list[dict[str, Any]] = []
-    try:
-        for article in client.paginate("/v1/articles"):
-            if fold(str(article.get("title") or "")) == wanted:
-                hits.append(article)
-    except LexwareError:
-        return None
+    if "__all__" not in cache:
+        # one scan per document, not per position
+        try:
+            cache["__all__"] = {"items": list(client.paginate("/v1/articles"))}
+        except LexwareError:
+            cache["__all__"] = {"items": []}
+    hits = [
+        a for a in cache["__all__"]["items"]
+        if fold(str(a.get("title") or "")) == wanted
+    ]
     if len(hits) != 1:
         return None
     cache[hits[0]["id"]] = hits[0]
@@ -590,7 +593,12 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
         word = str(out["type"]).strip().casefold()
         out["type"] = _VOUCHER_KINDS.get(word, out["type"])
     raw_tax = str(out.get("taxType") or "").strip().casefold()
-    out["taxType"] = _TAX_TYPES.get(raw_tax, out.get("taxType")) if raw_tax else "gross"
+    if raw_tax:
+        out["taxType"] = _TAX_TYPES.get(raw_tax, out.get("taxType"))
+    else:
+        guessed = _guess_tax_type(out)
+        if guessed:
+            out["taxType"] = guessed
     for key in ("totalGrossAmount", "totalTaxAmount"):
         if key in out:
             out[key] = to_number(out[key], field=key)
@@ -644,6 +652,36 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
     out["totalGrossAmount"] = _money(total_gross)
     out["totalTaxAmount"] = _money(total_tax)
     return out
+
+
+def _guess_tax_type(body: dict[str, Any]) -> str | None:
+    """taxType from the total: gross if the items add up to it, net if items
+    plus tax do. Without a total there is nothing to tell them apart."""
+    items = body.get("voucherItems")
+    total = _dec(body.get("totalGrossAmount"))
+    amounts: list[tuple[Decimal, Decimal]] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        amount, rate = _dec(item.get("amount")), _dec(item.get("taxRatePercent"))
+        if amount is None or rate is None:
+            amounts = []
+            break
+        amounts.append((amount, rate))
+    if not amounts:
+        return None  # nothing to calculate with — Lexware names what is missing
+    if total is not None:
+        gross = sum(a for a, _ in amounts)
+        net = sum(a + (a * r / 100).quantize(_CENT, rounding=ROUND_HALF_UP) for a, r in amounts)
+        if abs(gross - total) <= _TOTAL_TOLERANCE:
+            return "gross"
+        if abs(net - total) <= _TOTAL_TOLERANCE:
+            return "net"
+    raise LexwareError(
+        "taxType fehlt: 'gross' (Positionsbeträge inkl. Umsatzsteuer, z. B. Quittung "
+        "über 119 €) oder 'net' (Beträge ohne Steuer). Mit totalGrossAmount wird es "
+        "automatisch erkannt."
+    )
 
 
 def issue_keys(exc: LexwareAPIError) -> set[str]:

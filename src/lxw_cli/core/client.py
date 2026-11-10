@@ -377,7 +377,7 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
     (re.compile(r"Feld „([^“]+)“: invalid size", re.I),
      r"„\1“ hat eine ungültige Länge (z. B. Firmenname höchstens 255 Zeichen)"),
     (re.compile(r"Feld „([^“]+)“: invalid value", re.I), r"Ungültiger Wert für „\1“"),
-    (re.compile(r"size must be between (\d+) and (\d+)", re.I),
+    (re.compile(r"Feld „size must be between (\d+) and (\d+)“: bad request error", re.I),
      r"Suchbegriff muss \1 bis \2 Zeichen lang sein"),
 )
 _NOT_FOUND_RE = re.compile(
