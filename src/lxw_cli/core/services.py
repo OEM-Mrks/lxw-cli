@@ -11,6 +11,7 @@ from __future__ import annotations
 import mimetypes
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -101,39 +102,244 @@ def resolve_voucher_id(
 
 
 def resolve_voucher(
-    client: LexwareClient, identifier: str, voucher_type: str
+    client: LexwareClient,
+    identifier: str,
+    voucher_type: str,
+    *,
+    prefer: str | None = None,
 ) -> tuple[str, str | None]:
     """Like :func:`resolve_voucher_id`, but also return the voucherlist type.
 
     The type is only known when `identifier` is a voucher number (the
     voucherlist row carries it); for a UUID it is ``None``.
     """
-    identifier = identifier.strip()
-    if looks_like_uuid(identifier):
-        return identifier, None
-    matches = list(
+    match = find_voucher(client, identifier, voucher_type, prefer=prefer)
+    return match.id, match.type
+
+
+@dataclass
+class VoucherMatch:
+    """Result of :func:`find_voucher`.
+
+    `row` is the voucherlist entry (``None`` for a bare UUID), `note` a German
+    hint for the caller when the number had to be interpreted (prefix added,
+    several vouchers with the same number) — tools attach it as ``hinweis``.
+    """
+
+    id: str
+    type: str | None = None
+    row: dict[str, Any] | None = None
+    note: str | None = None
+
+
+# Documents written in Lexware's invoicing part. When a number exists twice,
+# such a document wins over a bookkeeping voucher with the same number (that
+# is usually a supplier's invoice or an imported copy that happens to share it).
+_INVOICING_TYPES = frozenset(
+    {"invoice", "downpaymentinvoice", "creditnote", "quotation",
+     "orderconfirmation", "deliverynote"}
+)
+# Bookkeeping vouchers (/v1/vouchers) — the only ones files can be attached to.
+BOOKKEEPING_TYPES = DEFAULT_VOUCHER_TYPES
+_LOOKUP_STATUSES = f"{DEFAULT_VOUCHER_STATUSES},unchecked"
+# How many vouchers with the same number we look at (more never happens in
+# practice; enough to list them all in a hint).
+_MAX_SAME_NUMBER = 10
+# Number shapes like "RE0006", "AG-2026-17", "GS0001": letters/prefix, digits,
+# optional suffix.
+_NUMBER_SHAPE_RE = re.compile(r"^(\D*?)(\d+)(\D*)$")
+
+
+def _type_label(voucher_type: str | None) -> str:
+    return VOUCHER_TYPE_LABELS.get(voucher_type or "", voucher_type or "Beleg")
+
+
+def _types_label(voucher_type: str) -> str:
+    labels = [_type_label(t.strip()) for t in voucher_type.split(",") if t.strip()]
+    return ", ".join(dict.fromkeys(labels))
+
+
+def _lookup_number(
+    client: LexwareClient, number: str, voucher_type: str
+) -> list[dict[str, Any]]:
+    return list(
         client.paginate(
             "/v1/voucherlist",
             params={
                 "voucherType": voucher_type,
                 # + unchecked: bookkeeping vouchers lacking data (e.g. created
                 # from an upload) — must stay findable by number for attaching.
-                "voucherStatus": f"{DEFAULT_VOUCHER_STATUSES},unchecked",
-                "voucherNumber": identifier,
+                "voucherStatus": _LOOKUP_STATUSES,
+                "voucherNumber": number,
             },
-            max_items=2,
+            max_items=_MAX_SAME_NUMBER,
         )
     )
-    if not matches:
+
+
+def _describe_row(row: dict[str, Any]) -> str:
+    parts = [f"{_type_label(row.get('voucherType'))} {row.get('voucherNumber') or ''}".strip()]
+    date = str(row.get("voucherDate") or "")[:10]
+    if date:
+        parts.append(f"vom {date}")
+    if row.get("contactName"):
+        parts.append(str(row["contactName"]))
+    if row.get("totalAmount") is not None:
+        parts.append(f"{row['totalAmount']} {row.get('currency') or 'EUR'}")
+    if row.get("voucherStatus"):
+        parts.append(f"Status {row['voucherStatus']}")
+    parts.append(f"id {row.get('id')}")
+    return ", ".join(parts)
+
+
+def _rank(row: dict[str, Any], prefer: set[str]) -> tuple[int, int, int, int]:
+    """Lower is better: preferred type, not voided, not a draft, invoicing doc."""
+    vtype = row.get("voucherType")
+    status = row.get("voucherStatus")
+    return (
+        0 if (not prefer or vtype in prefer) else 1,
+        1 if status == "voided" else 0,
+        1 if status in ("draft", "unchecked") else 0,
+        0 if vtype in _INVOICING_TYPES else 1,
+    )
+
+
+def _pick(
+    rows: list[dict[str, Any]], identifier: str, prefer: str | None
+) -> tuple[dict[str, Any], str | None]:
+    """Choose one voucher from several with the same number, or explain.
+
+    Raises when the ranking cannot tell them apart — then the model gets the
+    candidates with their ids and can ask again with the right one.
+    """
+    if len(rows) == 1:
+        return rows[0], None
+    wanted = {t.strip() for t in (prefer or "").split(",") if t.strip()}
+    ranked = sorted(rows, key=lambda r: _rank(r, wanted))
+    best, runner_up = ranked[0], ranked[1]
+    if _rank(best, wanted) == _rank(runner_up, wanted):
+        listing = "; ".join(_describe_row(r) for r in ranked)
         raise LexwareError(
-            f"Kein Beleg mit Nummer '{identifier}' (Typ: {voucher_type}) gefunden."
+            f"Mehrere Belege mit der Nummer '{identifier}' ({len(rows)}): {listing}. "
+            "Bitte den gewünschten Beleg über seine id abrufen."
         )
-    if len(matches) > 1:
-        raise LexwareError(
-            f"Mehrere Belege mit Nummer '{identifier}' gefunden — "
-            "bitte die UUID direkt angeben."
+    others = "; ".join(_describe_row(r) for r in ranked[1:])
+    note = (
+        f"Die Nummer '{identifier}' gibt es {len(rows)}-mal. Gezeigt: "
+        f"{_describe_row(best)}. Ebenfalls vorhanden: {others}."
+    )
+    return best, note
+
+
+def _number_candidates(identifier: str, sample: list[dict[str, Any]]) -> list[str]:
+    """Full voucher numbers the account uses that end in the digits given.
+
+    "2616" with numbers like "RE2610" in the account → "RE2616"; zero padding
+    is taken over ("6" with "RE0005" → "RE0006"). At most three shapes, most
+    frequent first, so a miss costs only a few extra requests.
+    """
+    digits = identifier.lstrip("0") or "0"
+    shapes: dict[tuple[str, int, str], int] = {}
+    for row in sample:
+        m = _NUMBER_SHAPE_RE.match(str(row.get("voucherNumber") or ""))
+        if not m or not m.group(1):
+            continue
+        key = (m.group(1), len(m.group(2)), m.group(3))
+        shapes[key] = shapes.get(key, 0) + 1
+    out: list[str] = []
+    for (prefix, width, suffix), _count in sorted(shapes.items(), key=lambda kv: -kv[1]):
+        candidate = f"{prefix}{digits.zfill(width)}{suffix}"
+        if candidate not in out:
+            out.append(candidate)
+        if len(out) == 3:
+            break
+    return out
+
+
+def find_voucher(
+    client: LexwareClient,
+    identifier: str,
+    voucher_type: str,
+    *,
+    prefer: str | None = None,
+) -> VoucherMatch:
+    """Resolve a voucher number (or UUID) to the voucher it means.
+
+    Exact number first (Lexware matches case-insensitively). If that fails:
+    without inner spaces ("RE 2616"), and for a number without letters the
+    account's own number shapes ("2616" → "RE2616"). Several vouchers with
+    one number: the best fit wins (`prefer` types, not voided, not a draft,
+    invoicing document before bookkeeping voucher) and `note` names the others;
+    a tie raises with the list of candidates.
+    """
+    identifier = identifier.strip()
+    if looks_like_uuid(identifier):
+        return VoucherMatch(id=identifier)
+    rows = _lookup_number(client, identifier, voucher_type)
+    used = identifier
+    note: str | None = None
+    if not rows and re.search(r"\s", identifier):
+        compact = re.sub(r"\s+", "", identifier)
+        rows = _lookup_number(client, compact, voucher_type)
+        if rows:
+            used = compact
+    sample: list[dict[str, Any]] | None = None
+    if not rows and identifier.isdigit():
+        sample = list(
+            client.paginate(
+                "/v1/voucherlist",
+                params={"voucherType": voucher_type, "voucherStatus": _LOOKUP_STATUSES},
+                max_items=250,
+            )
         )
-    return matches[0]["id"], matches[0].get("voucherType")
+        found: dict[str, dict[str, Any]] = {}
+        for candidate in _number_candidates(identifier, sample):
+            for row in _lookup_number(client, candidate, voucher_type):
+                found.setdefault(str(row.get("id")), row)
+        rows = list(found.values())
+        if rows:
+            numbers = ", ".join(dict.fromkeys(str(r.get("voucherNumber")) for r in rows))
+            note = f"Die Nummer '{identifier}' wurde als {numbers} gelesen."
+            used = numbers if len(rows) == 1 else identifier
+    if not rows:
+        raise LexwareError(_not_found_message(client, identifier, voucher_type, sample))
+    best, pick_note = _pick(rows, used, prefer)
+    note = " ".join(n for n in (note, pick_note) if n) or None
+    return VoucherMatch(
+        id=best["id"], type=best.get("voucherType"), row=best, note=note
+    )
+
+
+def _not_found_message(
+    client: LexwareClient,
+    identifier: str,
+    voucher_type: str,
+    sample: list[dict[str, Any]] | None,
+) -> str:
+    text = (
+        f"Kein Beleg mit Nummer '{identifier}' gefunden (gesucht: "
+        f"{_types_label(voucher_type)}). Gemeint ist die Belegnummer aus "
+        "Lexware, keine Bestell-, Transaktions- oder Lieferantennummer."
+    )
+    if sample is None:
+        try:
+            sample = list(
+                client.paginate(
+                    "/v1/voucherlist",
+                    params={"voucherType": voucher_type, "voucherStatus": _LOOKUP_STATUSES},
+                    max_items=25,
+                )
+            )
+        except LexwareError:
+            sample = []
+    examples = list(
+        dict.fromkeys(str(r["voucherNumber"]) for r in sample if r.get("voucherNumber"))
+    )[:4]
+    if examples:
+        text += f" Nummern in dieser Installation sehen z. B. so aus: {', '.join(examples)}."
+    return text + (
+        " Die Belegliste (nach Kontakt, Status oder Art gefiltert) zeigt die richtige Nummer."
+    )
 
 
 # Where Lexware serves a voucher's details, by voucherlist type. Bookkeeping
@@ -165,14 +371,15 @@ def get_voucher_details(
     is asked first; a UUID is probed against the endpoints of every allowed
     type until one answers. Only 404 moves on to the next endpoint.
     """
-    voucher_id, found_type = resolve_voucher(client, identifier, voucher_type)
+    match = find_voucher(client, identifier, voucher_type)
+    voucher_id, found_type = match.id, match.type
     allowed = [t.strip() for t in voucher_type.split(",")]
     paths = [p for t, p in _DETAIL_PATHS.items() if t in allowed]
     if found_type in _DETAIL_PATHS:
         paths.insert(0, _DETAIL_PATHS[found_type])
     for path in dict.fromkeys(paths):
         try:
-            return client.get(path.format(id=voucher_id))
+            return _with_note(client.get(path.format(id=voucher_id)), match.note)
         except LexwareAPIError as exc:
             if exc.status_code != 404:
                 raise
@@ -181,6 +388,14 @@ def get_voucher_details(
         "(weder als Rechnung, Abschlagsrechnung, Gutschrift, Angebot, Auftrag, "
         "Lieferschein noch als Buchhaltungsbeleg). Bitte Nummer oder ID prüfen."
     )
+
+
+def _with_note(data: Any, note: str | None) -> Any:
+    """Attach a resolver hint (``hinweis``) to a dict result."""
+    if note and isinstance(data, dict):
+        merged = " ".join(t for t in (note, data.get("hinweis")) if t)
+        return {**data, "hinweis": merged}
+    return data
 
 
 def get_with_voucher_fallback(client: LexwareClient, primary_path: str) -> Any:
@@ -549,7 +764,9 @@ def get_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
 
 def get_bookkeeping_voucher(client: LexwareClient, identifier: str) -> dict[str, Any]:
     """A bookkeeping voucher from /v1/vouchers only (e.g. to attach files)."""
-    voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
+    voucher_id = resolve_voucher(
+        client, identifier, ALL_VOUCHER_TYPES, prefer=BOOKKEEPING_TYPES
+    )[0]
     return client.get(f"/v1/vouchers/{voucher_id}")
 
 
@@ -592,7 +809,9 @@ def upload_voucher_file(
     JPG, PNG) and returns the created file's id — surfaced verbatim so the API
     stays the single source of truth for what is accepted.
     """
-    voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
+    voucher_id = resolve_voucher(
+        client, identifier, ALL_VOUCHER_TYPES, prefer=BOOKKEEPING_TYPES
+    )[0]
     filename, ctype = upload_name_and_type(filename, content, content_type)
     return client.post_multipart(
         f"/v1/vouchers/{voucher_id}/files",
@@ -723,16 +942,102 @@ def download_file(
 # -- Zahlstatus (payments) --------------------------------------------------
 
 
-def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]:
-    """Return the payment status of a sales voucher (invoice / credit note).
+# Voucher types Lexware keeps payments for (/v1/payments/{id}). Credit notes
+# from the invoicing part (Rechnungskorrekturen) are not among them — the API
+# answers 406 "No payment information for this voucher/voucher type
+# creditnote"; their state comes from the document itself.
+PAYMENT_TYPES = (
+    "invoice,downpaymentinvoice,salesinvoice,salescreditnote,"
+    "purchaseinvoice,purchasecreditnote"
+)
+_NO_PAYMENT_TYPES = frozenset({"quotation", "orderconfirmation", "deliverynote"})
+_NO_PAYMENT_RE = re.compile(r"no payment information.*?voucher type (\w+)", re.I | re.S)
 
-    Resolves `identifier` (voucher number like 'FB2600682' or a UUID) to its
-    id and reads ``/v1/payments/{id}``. The response carries the open amount,
-    the ``paymentStatus`` (open / paidoff / voided), when it was paid off
-    (``paidDate``) and the individual ``paymentItems``.
+
+def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]:
+    """Return the payment status of a voucher (invoice, credit note, …).
+
+    Resolves `identifier` (voucher number like 'FB2600682' or a UUID) and
+    reads ``/v1/payments/{id}``: open amount, ``paymentStatus``, ``paidDate``
+    and the individual ``paymentItems``. Rechnungskorrekturen (credit notes
+    from the invoicing part) have no payment record at Lexware; their status
+    is taken from the document (``paidoff`` = offset against the invoice).
+    Quotations, orders and delivery notes have no payment status at all.
     """
-    voucher_id = resolve_voucher_id(client, identifier, ALL_VOUCHER_TYPES)
-    return client.get(f"/v1/payments/{voucher_id}")
+    match = find_voucher(
+        client, identifier, ALL_VOUCHER_TYPES, prefer=f"{PAYMENT_TYPES},creditnote"
+    )
+    if match.type in _NO_PAYMENT_TYPES:
+        plural = {"quotation": "Angebote", "orderconfirmation": "Auftragsbestätigungen",
+                  "deliverynote": "Lieferscheine"}[match.type]
+        raise LexwareError(
+            f"Für {plural} gibt es bei Lexware keinen Zahlungsstatus – nur für "
+            "Rechnungen, Abschlagsrechnungen, Rechnungskorrekturen und "
+            "Buchhaltungsbelege."
+        )
+    if match.type == "creditnote":
+        return _with_note(_credit_note_payment_status(client, match), match.note)
+    try:
+        data = client.get(f"/v1/payments/{match.id}")
+    except LexwareAPIError as exc:
+        found = _NO_PAYMENT_RE.search(str(exc)) if exc.status_code == 406 else None
+        if not found:
+            raise
+        if found.group(1).lower() == "creditnote":
+            return _credit_note_payment_status(client, match)
+        raise LexwareError(
+            f"Für diesen Beleg ({_type_label(found.group(1).lower())}) führt Lexware "
+            "keinen Zahlungsstatus."
+        ) from exc
+    return _with_note(data, match.note)
+
+
+def _credit_note_payment_status(
+    client: LexwareClient, match: VoucherMatch
+) -> dict[str, Any]:
+    """Payment view of a Rechnungskorrektur, built from the document."""
+    doc = client.get(f"/v1/credit-notes/{match.id}")
+    row = match.row or {}
+    status = doc.get("voucherStatus") or row.get("voucherStatus")
+    total = (doc.get("totalPrice") or {}).get("totalGrossAmount", row.get("totalAmount"))
+    currency = (doc.get("totalPrice") or {}).get("currency") or row.get("currency") or "EUR"
+    open_amount = row.get("openAmount")
+    if open_amount is None and status in ("paidoff", "paid", "voided"):
+        open_amount = 0
+    related = [
+        {k: v for k, v in r.items() if k in ("id", "voucherNumber", "voucherType")}
+        for r in doc.get("relatedVouchers") or []
+    ]
+    invoices = ", ".join(r["voucherNumber"] for r in related if r.get("voucherNumber"))
+    if status == "paidoff":
+        state = "balanced"
+        text = (
+            "Die Rechnungskorrektur ist verrechnet bzw. ausgeglichen"
+            + (f" (bei der Rechnung {invoices} als Teilzahlung erfasst)." if invoices else ".")
+        )
+    elif status == "voided":
+        state = "voided"
+        text = "Die Rechnungskorrektur ist storniert."
+    elif status == "draft":
+        state = "draft"
+        text = "Die Rechnungskorrektur ist noch ein Entwurf."
+    else:
+        state = "open"
+        text = "Die Rechnungskorrektur ist offen, also noch nicht ausgezahlt oder verrechnet."
+    return {
+        "voucherType": "creditnote",
+        "voucherNumber": doc.get("voucherNumber") or row.get("voucherNumber"),
+        "voucherStatus": status,
+        "paymentStatus": state,
+        "totalAmount": total,
+        "openAmount": open_amount,
+        "currency": currency,
+        "paymentItems": [],
+        "relatedVouchers": related,
+        "hinweis": text
+        + " Lexware führt für Rechnungskorrekturen keine eigenen Zahlungsdaten; "
+        "der Stand kommt aus dem Beleg selbst.",
+    }
 
 
 # -- Buchungskategorien (posting categories) --------------------------------

@@ -273,6 +273,10 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
 def _extract_message(response: httpx.Response) -> str:
     body = _safe_json(response)
     if isinstance(body, dict):
+        # HTTP 403 {"i18nKey": "access_denied", "type": "user_not_authorized"}:
+        # the key's user lacks the right or the plan lacks the feature.
+        if body.get("type") == "user_not_authorized" or body.get("i18nKey") == "access_denied":
+            return _ACCESS_DENIED
         # Lexware reports field-level validation problems (e.g. an over-long
         # text) in a `details` list. Surface those first — they are far more
         # specific than the generic top-level message — and phrase length
@@ -287,6 +291,16 @@ def _extract_message(response: httpx.Response) -> str:
             if key in body and body[key]:
                 return _translate_known_message(str(body[key]))
     return response.text or response.reason_phrase or "API error"
+
+
+_ACCESS_DENIED = (
+    "Keine Berechtigung: Lexware lässt diese Aktion mit dem API-Schlüssel dieser "
+    "Installation nicht zu. Entweder fehlen dem Lexware-Benutzer, der den "
+    "Schlüssel erzeugt hat, die Rechte dafür, oder der Lexware-Tarif enthält "
+    "diese Funktion nicht. Andere Aktionen funktionieren weiter. Abhilfe: in "
+    "Lexware die Benutzerrechte bzw. den Tarif prüfen und danach einen neuen "
+    "API-Schlüssel erzeugen und die Verbindung neu einrichten."
+)
 
 
 # Known Lexware error texts that are hard to understand for end users, with a

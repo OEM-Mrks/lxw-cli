@@ -851,10 +851,13 @@ def get_payment_status(identifier: str) -> dict[str, Any]:
     """Show whether an invoice is paid and how much is still open.
 
     Use this to answer "is invoice X paid?" / "what's still open on X?".
-    Accepts an invoice number (e.g. 'FB2600682') or id — also works for other
-    sales vouchers like credit notes. Returns the still-open amount, the
-    payment state (open / paid off / voided), the date it was paid off and the
-    individual recorded payments.
+    Accepts a voucher number (e.g. 'FB2600682', also just its digits) or id.
+    Works for invoices, down payment invoices, bookkeeping vouchers and
+    Rechnungskorrekturen (credit notes). Returns the still-open amount, the
+    payment state (open / paid off / balanced / voided), the date it was paid
+    off and the individual recorded payments; `hinweis` explains special cases
+    (e.g. a credit note offset against its invoice). Quotations, order
+    confirmations and delivery notes have no payment status.
     """
     return services.get_payment_status(_client_get(), identifier)
 
