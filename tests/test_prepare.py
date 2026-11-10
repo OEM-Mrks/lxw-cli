@@ -52,7 +52,8 @@ def test_timestamp_without_millis_or_offset_is_completed() -> None:
 
 
 def test_unparseable_date_is_left_for_lexware() -> None:
-    assert document_timestamp("morgen") == "morgen"
+    assert document_timestamp("irgendwann") == "irgendwann"
+    assert document_timestamp("morgen").startswith("20")  # relative words work
     assert document_timestamp(None) is None
 
 
@@ -111,7 +112,10 @@ def test_tax_free_type_defaults_rate_to_zero() -> None:
 
 def test_invoice_gets_shipping_conditions_and_dates_normalized() -> None:
     out = prepare_document(None, _quotation(), INVOICE)
-    assert out["shippingConditions"] == {"shippingType": "none"}
+    # date of service defaults to the invoice date (§ 14 UStG), like the web app
+    assert out["shippingConditions"] == {
+        "shippingType": "service", "shippingDate": out["voucherDate"]
+    }
     assert "expirationDate" not in out
     out = prepare_document(
         None,

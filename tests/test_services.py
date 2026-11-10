@@ -282,7 +282,9 @@ def test_create_order_confirmation_posts_body(client: LexwareClient) -> None:
     route = respx.post("https://api.lexware.io/v1/order-confirmations").mock(
         return_value=httpx.Response(201, json={"id": "new-order"})
     )
-    result = services.create_order_confirmation(client, {"lineItems": []})
+    result = services.create_order_confirmation(
+        client, {"lineItems": [{"type": "custom", "name": "X", "unitPrice": {"netAmount": 1}}]}
+    )
     assert result == {"id": "new-order"}
     assert route.called
 
@@ -354,7 +356,10 @@ def test_update_contact_merges_and_keeps_version(client: LexwareClient) -> None:
         "emailAddresses": {"business": ["alt@x.com"]},
         "archived": False,
     }
-    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(return_value=httpx.Response(200, json=current))
+    stored = {**current, "version": 4, "company": {**current["company"], "name": "Neu GmbH"}}
+    respx.get(f"{_CONTACTS}/{_CONTACT_ID}").mock(
+        side_effect=[httpx.Response(200, json=current), httpx.Response(200, json=stored)]
+    )
     put = respx.put(f"{_CONTACTS}/{_CONTACT_ID}").mock(
         return_value=httpx.Response(200, json={"id": _CONTACT_ID, "version": 4})
     )
@@ -621,13 +626,17 @@ def test_create_dunning_pursues_invoice(client: LexwareClient) -> None:
     assert "remark" not in body
 
 
+@respx.mock
 def test_get_dunning_rejects_a_number(client: LexwareClient) -> None:
     import pytest
 
     from lxw_cli.core.errors import LexwareError
 
-    # A voucher number can't be resolved to a dunning — fail early, no HTTP call.
-    with pytest.raises(LexwareError, match="nur über ihre id"):
+    # Not a dunning, not an invoice: clear message naming what is expected.
+    respx.get("https://api.lexware.io/v1/voucherlist").mock(
+        return_value=httpx.Response(200, json={"content": [], "last": True})
+    )
+    with pytest.raises(LexwareError, match="RE0001_1"):
         services.get_dunning(client, "MA-1")
 
 
@@ -744,10 +753,10 @@ def test_invalid_voucher_type_is_rejected_before_the_api(client: LexwareClient) 
 
     route = respx.get(_VOUCHERLIST).mock(return_value=httpx.Response(400))
     with pytest.raises(LexwareError) as excinfo:
-        services.list_vouchers(client, voucher_type="purchaseinvoice,voucher")
+        services.list_vouchers(client, voucher_type="purchaseinvoice,kuchen")
     assert not route.called
     message = str(excinfo.value)
-    assert "'voucher'" in message
+    assert "'kuchen'" in message
     assert "purchaseinvoice (Eingangsrechnung)" in message
     assert "any" in message
 
@@ -758,7 +767,7 @@ def test_valid_voucher_type_is_normalized(client: LexwareClient) -> None:
         return_value=httpx.Response(200, json={"content": [], "last": True})
     )
     services.list_vouchers(client, voucher_type=" PurchaseInvoice, any,purchaseinvoice")
-    assert route.calls.last.request.url.params["voucherType"] == "purchaseinvoice,any"
+    assert route.calls.last.request.url.params["voucherType"] == "any"
 
 
 @respx.mock
@@ -767,7 +776,7 @@ def test_list_order_confirmations_filters_number_and_contact(client: LexwareClie
         return_value=httpx.Response(200, json={"content": [], "last": True})
     )
     services.list_order_confirmations(client, number="AB6246648", contact_id=_UUID)
-    params = route.calls.last.request.url.params
+    params = route.calls[0].request.url.params
     assert params["voucherType"] == "orderconfirmation"
     assert params["voucherNumber"] == "AB6246648"
     assert params["contactId"] == _UUID
@@ -808,7 +817,7 @@ def test_get_article_unknown_number(client: LexwareClient) -> None:
     )
     with pytest.raises(LexwareError) as excinfo:
         services.get_article(client, "GIBTSNICHT")
-    assert "Kein Artikel mit Artikelnummer 'GIBTSNICHT'" in str(excinfo.value)
+    assert "Kein Artikel mit Artikelnummer oder Bezeichnung 'GIBTSNICHT'" in str(excinfo.value)
 
 
 # -- Kontakt-ID vorab prüfen (v0.9.3) ----------------------------------------
@@ -915,7 +924,9 @@ def test_get_invoice_not_found_anywhere_is_clear(client: LexwareClient) -> None:
     respx.get(f"{_API}/invoices/{_UUID}").mock(return_value=_not_found())
     respx.get(f"{_API}/vouchers/{_UUID}").mock(return_value=_not_found())
     respx.get(f"{_API}/down-payment-invoices/{_UUID}").mock(return_value=_not_found())
-    with pytest.raises(LexwareError, match="nicht gefunden"):
+    for other in ("credit-notes", "quotations", "order-confirmations", "delivery-notes"):
+        respx.get(f"{_API}/{other}/{_UUID}").mock(return_value=_not_found())
+    with pytest.raises(LexwareError, match="keinen Beleg"):
         services.get_invoice(client, _UUID)
 
 

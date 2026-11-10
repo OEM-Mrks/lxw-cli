@@ -271,6 +271,10 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
 
 
 def _extract_message(response: httpx.Response) -> str:
+    return _translate_text(_raw_message(response), response.status_code)
+
+
+def _raw_message(response: httpx.Response) -> str:
     body = _safe_json(response)
     if isinstance(body, dict):
         # HTTP 403 {"i18nKey": "access_denied", "type": "user_not_authorized"}:
@@ -291,6 +295,105 @@ def _extract_message(response: httpx.Response) -> str:
             if key in body and body[key]:
                 return _translate_known_message(str(body[key]))
     return response.text or response.reason_phrase or "API error"
+
+
+def _one_of(match: re.Match[str]) -> str:
+    value, field, allowed = match.group(1), match.group(2), match.group(3)
+    options = [o.strip() for o in allowed.split(",") if o.strip()]
+    if "countrycode" in field.lower() or len(options) > 15:
+        hint = "bitte als ISO-Code, z. B. DE, AT, CH" if "country" in field.lower() else (
+            f"{len(options)} mögliche Werte, z. B. {', '.join(options[:5])}"
+        )
+        return f"Ungültiger Wert '{value}' für „{field}“ – {hint}."
+    return f"Ungültiger Wert '{value}' für „{field}“. Erlaubt: {', '.join(options)}."
+
+
+# English Lexware texts → German, applied anywhere inside a message (also in
+# field lists like "Feld „x“: missing entity"). Order matters: specific first.
+_TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
+    (
+        re.compile(
+            r"Invalid value '([^']*)' for '([^']+)'\. Value must be one of: \[([^\]]*)\]\.?"
+        ),
+        _one_of,
+    ),
+    (re.compile(r"Invalid value '([^']*)' for '([^']+)'\. Value of type BigDecimal expected\.?"),
+     r"„\2“ braucht eine Zahl wie 49.90 (erhalten: '\1')."),
+    (re.compile(r"Invalid value '([^']*)' for '([^']+)'\. Value of type Integer expected\.?"),
+     r"„\2“ braucht eine ganze Zahl (erhalten: '\1')."),
+    (re.compile(r"Invalid value '([^']*)' for '([^']+)'\. Value of type UUID expected\.?"),
+     r"„\2“ braucht eine id (UUID mit 36 Zeichen), erhalten: '\1'."),
+    (re.compile(r"Type mismatch for given value '([^']*)'\. Expected type is 'UUID'\.?"),
+     r"'\1' ist keine gültige id (erwartet wird eine UUID mit 36 Zeichen)."),
+    (re.compile(r"Invalid value '([^']*)' received for request parameter '([^']+)'\.?"),
+     r"Ungültiger Wert '\1' für „\2“."),
+    (re.compile(r"The date value '([^']*)'.*?cannot be parsed\.?", re.S),
+     r"Das Datum '\1' ist nicht lesbar – bitte TT.MM.JJJJ oder JJJJ-MM-TT."),
+    (re.compile(r"The unit price must not be null\.?", re.I),
+     "Eine Position hat keinen Preis (unitPrice mit netAmount bzw. grossAmount fehlt)."),
+    (re.compile(r"Net amount is missing in unit price\.?", re.I),
+     "Nettopreis fehlt (unitPrice.netAmount). Für Bruttopreise taxConditions.taxType "
+     "'gross' und grossAmount angeben."),
+    (re.compile(r"Gross amount is missing in unit price\.?", re.I),
+     "Bruttopreis fehlt (unitPrice.grossAmount). Für Nettopreise taxConditions.taxType "
+     "'net' und netAmount angeben."),
+    (re.compile(r"The shipping end date must not be null[^.]*\.?", re.I),
+     "Für einen Zeitraum (serviceperiod/deliveryperiod) fehlt das Enddatum (shippingEndDate)."),
+    (re.compile(r"No vatfree invoices allowed for this organization\.?", re.I),
+     "Steuerfreie Belege (taxType 'vatfree') sind für diese Firma nicht erlaubt – bitte "
+     "'net' oder 'gross'."),
+    (re.compile(r"The referenced entity with the id '([^']*)' does not exist\.?", re.I),
+     r"Der verknüpfte Datensatz mit der id \1 existiert nicht (meist eine falsche "
+     r"Kontakt- oder Artikel-id)."),
+    (re.compile(r"Validation failed as prerequisite not given\.?", re.I),
+     "Lexware lehnt den Beleg ab, weil eine Voraussetzung fehlt (häufig: Positionen ohne "
+     "Preis oder ein Ausgangsbeleg, der nicht offen ist)."),
+    (re.compile(r"preceding sales voucher must be open[^.\n]*\.?", re.I),
+     "Der Ausgangsbeleg muss offen sein (nicht bezahlt, storniert oder ein Entwurf)."),
+    (re.compile(r"Name and countryCode are required address fields\.?", re.I),
+     "Für eine Adresse ohne Kontakt sind Name und Ländercode (z. B. DE) Pflicht."),
+    (re.compile(r"mimetype mismatch", re.I),
+     "Dateiinhalt passt nicht zur Dateiendung (z. B. Text unter .pdf) – bitte die "
+     "Originaldatei hochladen"),
+    (re.compile(r"inacceptable[ _]mimetype", re.I),
+     "Dateityp nicht akzeptiert oder Datei beschädigt/abgeschnitten – Lexware nimmt PDF, "
+     "JPG, PNG oder XML; am besten den Upload-Link nutzen"),
+    (re.compile(r"non (income|outgo) posting category[^.\n]*", re.I),
+     "Die Buchungskategorie passt nicht zur Belegart (Einnahmen-Kategorie für "
+     "Ausgangsrechnung/Verkaufsgutschrift, Ausgaben-Kategorie für Eingangsrechnung)"),
+    (re.compile(r"Feld „([^“]+)“: missing entity", re.I), r"Pflichtangabe „\1“ fehlt"),
+    (
+        re.compile(r"Feld „(?:company\.)?contactPersons\.size“: invalid value", re.I),
+        "Nur ein Ansprechpartner pro Firmenkontakt (Grenze der Lexware-API)",
+    ),
+    (re.compile(r"countrycode is not valid", re.I),
+     "Ländercode ungültig – bitte ISO-Code wie DE, AT, CH"),
+    (re.compile(r"invalid email", re.I), "ungültige E-Mail-Adresse"),
+    (re.compile(r"invalid taxrate", re.I), "ungültiger Steuersatz (möglich: 0, 7 oder 19 %)"),
+    (re.compile(r"Ungültiger Umsatzsteuersatz\.", re.I),
+     "Ungültiger Umsatzsteuersatz (möglich: 0, 7 oder 19 %)."),
+    (re.compile(r"Wähle einen gültigen Steuersatz", re.I),
+     "Ungültiger Steuersatz (üblich: 0, 7 oder 19 %)"),
+    (re.compile(r"Feld „([^“]+)“: invalid size", re.I),
+     r"„\1“ hat eine ungültige Länge (z. B. Firmenname höchstens 255 Zeichen)"),
+    (re.compile(r"Feld „([^“]+)“: invalid value", re.I), r"Ungültiger Wert für „\1“"),
+    (re.compile(r"size must be between (\d+) and (\d+)", re.I),
+     r"Suchbegriff muss \1 bis \2 Zeichen lang sein"),
+)
+_NOT_FOUND_RE = re.compile(
+    r"^(not found|.*requested resource.*does not exist.*|.*does not exist\.?)$", re.I | re.S
+)
+
+
+def _translate_text(message: str, status: int) -> str:
+    if status == 404 and _NOT_FOUND_RE.match(message.strip()):
+        return (
+            "Nicht gefunden – unter dieser id gibt es hier keinen passenden Datensatz "
+            "(evtl. die id eines anderen Datensatzes, z. B. eines Belegs statt eines Kontakts)."
+        )
+    for pattern, replacement in _TRANSLATIONS:
+        message = pattern.sub(replacement, message)
+    return message
 
 
 _ACCESS_DENIED = (

@@ -70,7 +70,16 @@ def validate_voucher(body: dict[str, Any]) -> None:
     if not isinstance(body, dict):
         return
     violations: list[str] = []
-    _check(body.get("title"), VOUCHER_TITLE_MAX, "Der Belegtitel", violations)
+    title = body.get("title")
+    if isinstance(title, str):
+        # Lexware stores & < > escaped (&amp; …) and counts that length.
+        stored = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if len(stored) > VOUCHER_TITLE_MAX:
+            extra = " (& < > zählen bei Lexware als 4–5 Zeichen)" if stored != title else ""
+            violations.append(
+                f"Der Belegtitel darf höchstens {VOUCHER_TITLE_MAX} Zeichen haben "
+                f"(aktuell {len(stored)}{extra})."
+            )
     _check(
         body.get("introduction"),
         VOUCHER_INTRODUCTION_MAX,

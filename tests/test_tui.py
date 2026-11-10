@@ -184,7 +184,10 @@ async def test_tui_creates_order_draft_and_switches_to_orders(config) -> None:
             # the article's 0.12) and an introduction text is set. Then submit.
             from textual.widgets import TextArea
 
-            screen._contact = {"id": "c-1", "company": {"name": "Acme"}}
+            screen._contact = {
+                "id": "c0000000-0000-4000-8000-000000000001",
+                "company": {"name": "Acme"},
+            }
             screen._positions = [
                 (
                     {"title": "Schraube", "price": {"netPrice": 0.12, "taxRate": 19}},
@@ -201,7 +204,7 @@ async def test_tui_creates_order_draft_and_switches_to_orders(config) -> None:
             import json
 
             body = json.loads(create_route.calls.last.request.content)
-            assert body["address"] == {"contactId": "c-1"}
+            assert body["address"] == {"contactId": "c0000000-0000-4000-8000-000000000001"}
             assert body["lineItems"][0]["name"] == "Schraube"
             assert body["lineItems"][0]["quantity"] == 50.0
             assert body["lineItems"][0]["unitPrice"]["netAmount"] == 0.10
@@ -307,9 +310,10 @@ def test_search_contacts_picks_name_or_email_param(config) -> None:
     client = LexwareClient(config)
     try:
         search_contacts(client, "Acme")
-        assert "name=Acme" in str(route.calls.last.request.url)
+        assert "name=Acme" in str(route.calls[0].request.url)
+        before = len(route.calls)
         search_contacts(client, "info@acme.de")
-        url = str(route.calls.last.request.url)
+        url = str(route.calls[before].request.url)
         assert "email=info%40acme.de" in url
         assert "name=" not in url
     finally:

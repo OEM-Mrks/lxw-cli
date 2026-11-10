@@ -814,11 +814,11 @@ def list_invoices(
 
     Parameters are exactly: limit, voucher_status, voucher_number, contact_id,
     include_archived (there is no `status`, `number`, `customer` or `query`).
-    voucher_status: comma-separated, e.g. 'open,paid' (default: all non-overdue).
-        'overdue' (überfällig) may be combined, e.g. 'open,overdue' —
-        it is queried separately and merged.
-    voucher_number: filter by exact invoice number.
-    contact_id: filter by customer UUID.
+    voucher_status: comma-separated, e.g. 'open,paid' (default: all, overdue
+        ones included). German or English words work (offen/open, bezahlt/paid, überfällig/overdue,
+        Entwurf/draft, storniert/voided, angenommen/accepted, abgelehnt/rejected).
+    voucher_number: invoice number; also found without prefix ('6' → RE0006).
+    contact_id: the customer's id — a customer number or exact name also works.
     include_archived: archived invoices are excluded by default; set True to
         include them (filtered server-side).
     limit: max results to return; set to 0 to fetch all (paginates internally).
@@ -864,15 +864,16 @@ def get_payment_status(identifier: str) -> dict[str, Any]:
 
 @mcp.tool
 def download_invoice_pdf(identifier: str, output_dir: str | None = None) -> str | File:
-    """Download an invoice PDF. Accepts UUID or invoice number.
+    """Download an invoice PDF — also of a down payment invoice or a
+    Rechnungskorrektur (credit note). Accepts UUID or number.
 
     Over stdio the PDF is saved to ~/Downloads/lexware/ (or output_dir) and the
     absolute path is returned. Over HTTP the PDF is returned inline as binary
     content and output_dir is ignored (the server's disk isn't the caller's).
     Note: drafts cannot be downloaded — the API requires a finalized status.
     """
-    data = services.download_invoice_pdf(_client_get(), identifier)
-    return _pdf_result(data, output_dir, f"invoice-{identifier}.pdf")
+    data, stem = services.download_pdf(_client_get(), identifier, services.INVOICE_PDF_TYPES)
+    return _pdf_result(data, output_dir, f"{stem}.pdf")
 
 
 @mcp.tool
@@ -887,7 +888,9 @@ def list_contacts(
 ) -> list[dict[str, Any]]:
     """List contacts (customers/vendors).
 
-    name/email require >=3 chars. Use customer/vendor flags to filter by role.
+    name: part of the company/person name; contact persons, e-mails and other
+    spellings (ä = ae) are searched too. number: customer or vendor number
+    ('K-10021' works). customer/vendor: both set = contacts with BOTH roles.
     Archived contacts are excluded by default; set include_archived=True to keep
     them (the API has no server-side archived filter, so this filters
     client-side). Set limit=0 to fetch all contacts (paginates internally).
@@ -906,7 +909,8 @@ def list_contacts(
 
 @mcp.tool
 def get_contact(contact_id: str) -> dict[str, Any]:
-    """Get a contact's details by UUID."""
+    """Get a contact's details by id — a customer/vendor number or the exact
+    name works too (ambiguous names list the candidates)."""
     return services.get_contact(_client_get(), contact_id)
 
 
@@ -924,11 +928,13 @@ def list_vouchers(
     voucher_type: comma-separated, e.g. 'salesinvoice,purchaseinvoice'.
         Valid values only: salesinvoice, salescreditnote, purchaseinvoice,
         purchasecreditnote, invoice, downpaymentinvoice, creditnote,
-        orderconfirmation, quotation, deliverynote, any ('voucher' is NOT a
-        type). Default: all sales/purchase types.
-    voucher_status: comma-separated, e.g. 'open,paid' (default: all non-overdue).
-        'overdue' (überfällig) may be combined, e.g. 'open,overdue' —
-        it is queried separately and merged.
+        orderconfirmation, quotation, deliverynote, any. German words work too
+        (Rechnung, Gutschrift, Angebot, Auftrag, Lieferschein, Eingangsrechnung).
+        Default: ALL types.
+    voucher_status: comma-separated, e.g. 'open,paid' (default: all).
+        German or English words work (offen/open, bezahlt/paid, überfällig/overdue,
+        Entwurf/draft, storniert/voided, angenommen/accepted, abgelehnt/rejected).
+    voucher_number: finds the voucher whatever its type ('6' → RE0006).
     Archived vouchers are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all (paginates internally).
     """
@@ -962,8 +968,10 @@ def list_posting_categories(category_type: str | None = None) -> list[dict[str, 
     These are the categories a bookkeeping voucher is assigned to (e.g.
     revenue/income vs. expense categories). Use this to pick the right category
     when recording a receipt or purchase, and to answer "which categories can I
-    book to?". `category_type` optionally narrows the list to one kind (income
-    or expense). Returns each category's id and name.
+    book to?". `category_type` optionally narrows the list: 'income'
+    (Einnahmen) or 'outgo' (Ausgaben; 'expense' works too). Returns each
+    category's id, name and type. A voucher may also name its category instead
+    of the id — it is looked up here.
     """
     return services.list_posting_categories(
         _client_get(), category_type=category_type
@@ -1030,6 +1038,9 @@ def list_quotations(
     """List quotations (Angebote).
 
     voucher_status: comma-separated filter, e.g. 'open,accepted'.
+        German or English words work (offen/open, bezahlt/paid,
+        überfällig/overdue, Entwurf/draft, storniert/voided,
+        angenommen/accepted, abgelehnt/rejected).
     voucher_number: filter by exact quotation number.
     contact_id: filter by customer UUID.
     Archived quotations are excluded by default; set include_archived=True to
@@ -1061,8 +1072,8 @@ def download_quotation_pdf(identifier: str, output_dir: str | None = None) -> st
 
     stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
     """
-    data = services.download_quotation_pdf(_client_get(), identifier)
-    return _pdf_result(data, output_dir, f"quotation-{identifier}.pdf")
+    data, stem = services.download_pdf(_client_get(), identifier, "quotation")
+    return _pdf_result(data, output_dir, f"{stem}.pdf")
 
 
 @mcp.tool
@@ -1076,6 +1087,9 @@ def list_order_confirmations(
     """List order confirmations (Aufträge).
 
     voucher_status: comma-separated filter, e.g. 'draft,open'.
+        German or English words work (offen/open, bezahlt/paid,
+        überfällig/overdue, Entwurf/draft, storniert/voided,
+        angenommen/accepted, abgelehnt/rejected).
     voucher_number: filter by exact order number (e.g. 'AB6246648').
     contact_id: filter by customer UUID.
     Archived orders are excluded by default; set include_archived=True to
@@ -1110,8 +1124,8 @@ def download_order_confirmation_pdf(
     stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
     Drafts have no PDF yet — they must be finalized in Lexware first.
     """
-    data = services.download_order_confirmation_pdf(_client_get(), identifier)
-    return _pdf_result(data, output_dir, f"order-{identifier}.pdf")
+    data, stem = services.download_pdf(_client_get(), identifier, "orderconfirmation")
+    return _pdf_result(data, output_dir, f"{stem}.pdf")
 
 
 @mcp.tool
@@ -1125,6 +1139,9 @@ def list_delivery_notes(
     """List delivery notes (Lieferscheine).
 
     voucher_status: comma-separated filter.
+        German or English words work (offen/open, bezahlt/paid,
+        überfällig/overdue, Entwurf/draft, storniert/voided,
+        angenommen/accepted, abgelehnt/rejected).
     voucher_number: filter by exact delivery note number.
     contact_id: filter by customer UUID.
     Archived delivery notes are excluded by default; set include_archived=True
@@ -1155,17 +1172,16 @@ def download_delivery_note_pdf(identifier: str, output_dir: str | None = None) -
 
     stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
     """
-    data = services.download_delivery_note_pdf(_client_get(), identifier)
-    return _pdf_result(data, output_dir, f"deliverynote-{identifier}.pdf")
+    data, stem = services.download_pdf(_client_get(), identifier, "deliverynote")
+    return _pdf_result(data, output_dir, f"{stem}.pdf")
 
 
 @mcp.tool
 def get_dunning(dunning_id: str) -> dict[str, Any]:
     """Get a dunning (payment reminder) by its id.
 
-    A dunning can only be addressed by its id — take it from the result when
-    the dunning was created, or from the related documents of the invoice it
-    belongs to. (Dunnings cannot be listed or looked up by a number.)
+    `dunning_id`: the dunning's id, its number (e.g. 'RE0001_1') or the
+    number/id of the invoice — then its latest dunning is returned.
     """
     return services.get_dunning(_client_get(), dunning_id)
 
@@ -1175,7 +1191,8 @@ def download_dunning_pdf(dunning_id: str, output_dir: str | None = None) -> str 
     """Download a dunning's PDF by its id.
 
     stdio: saves to disk and returns the path. HTTP: returns the PDF inline.
-    Only finalized dunnings have a PDF.
+    Drafts get a preview PDF. Instead of the id, the dunning's number
+    (e.g. 'RE0001_1') or the invoice number works too.
     """
     data = services.download_dunning_pdf(_client_get(), dunning_id)
     return _pdf_result(data, output_dir, f"dunning-{dunning_id}.pdf")
@@ -1251,6 +1268,13 @@ def create_voucher_draft(
 ) -> dict[str, Any]:
     """Create a bookkeeping voucher (e.g. a purchase invoice / receipt) and
     attach the original document (PDF/JPG/PNG).
+
+    Note: Lexware books it right away with status 'open' (there is no draft
+    state for bookkeeping vouchers). `type` may be German (Eingangsrechnung,
+    Ausgangsrechnung, Gutschrift); `categoryId` may be the category's name;
+    dates as TT.MM.JJJJ work; without contactId the collective contact is
+    used. The same number with the same contact and amount is not booked twice
+    — the existing voucher is returned with a `hinweis`.
 
     Lexware works in two steps — the voucher is created first, and only its
     new id can receive the file. NEVER put the file or its content into
@@ -1476,7 +1500,8 @@ def attach_chat_file(identifier: str, file: ChatFile) -> dict[str, Any]:
 def download_voucher_file(file_id: str, output_dir: str | None = None) -> str | File:
     """Download a stored file (e.g. a voucher's attached receipt) by its file id.
 
-    File ids appear in a voucher's list of attached files. Over stdio the file
+    File ids appear in a voucher's `files` (or `files.documentFileId`). A
+    voucher number or voucher id works too: then that voucher's file/PDF. Over stdio the file
     is saved to ~/Downloads/lexware/ (or output_dir) and the path is returned;
     over HTTP the file is returned inline and output_dir is ignored.
     """
@@ -1497,7 +1522,9 @@ def create_article(body: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool
 def update_article(article_id: str, changes: dict[str, Any]) -> dict[str, Any]:
-    """Update an existing article by UUID — pass only the fields to change.
+    """Update an existing article by UUID or article number — pass only the
+    fields to change. Returns what Lexware actually stored (with `hinweis`
+    when nothing changed). Changing only netPrice makes the net price leading.
 
     Same partial-merge + automatic `version` handling as update_contact.
     Nested objects merge key-by-key; lists are replaced wholesale.
@@ -1592,8 +1619,11 @@ def continue_document(identifier: str, target: str) -> dict[str, Any]:
         - from an order confirmation (Auftrag): 'Lieferschein' or 'Rechnung'
         - from a delivery note (Lieferschein): 'Rechnung'
         - from an invoice (Rechnung): 'Lieferschein' or 'Rechnungskorrektur'
-    Notes: continuing to an invoice/credit note requires the source to be
-    finalized (festgeschrieben) first — reported clearly if not. 'Abschlags-
+    Article positions keep their link to the article; the source's own
+    title/introduction/closing text are not taken over (Lexware uses the
+    standard texts of the new type). A quotation may still be a draft; for a
+    Rechnungskorrektur or a dunning the invoice must be finalized and open —
+    reported clearly if not. 'Abschlags-
     rechnung' and 'Serienrechnung' cannot be created via the interface (only in
     Lexware directly). Unsupported steps are reported clearly.
     """
