@@ -295,3 +295,99 @@ def test_contact_address_object_with_german_keys() -> None:
 def test_identifier_cleaning() -> None:
     assert services._clean_number("​RE００４０") == "RE0040"
     assert services._clean_number("'RE0078'") == "RE0078"
+
+
+# -- Review 0.9.14 -------------------------------------------------------------
+
+
+def test_copy_of_old_invoice_drops_old_due_date() -> None:
+    read = {"id": U1, "createdDate": "2026-09-01T00:00:00.000+02:00", "voucherNumber": "RE0016",
+            "voucherDate": "2026-09-01T00:00:00.000+02:00",
+            "dueDate": "2026-09-15T00:00:00.000+02:00",
+            "paymentConditions": {"paymentTermLabel": "Zahlbar innerhalb von 14 Tagen",
+                                  "paymentTermDuration": 14},
+            "lineItems": [LINE]}
+    out = prepare_document(None, read, INVOICE)
+    assert out["paymentConditions"]["paymentTermDuration"] == 14
+    assert "dueDate" not in out
+
+
+def test_own_number_and_date_is_not_a_copy() -> None:
+    out = prepare_document(None, {"voucherNumber": "2026-100", "voucherDate": "01.11.2026",
+                                  "lineItems": [LINE]}, INVOICE)
+    assert out["voucherDate"].startswith("2026-11-01") and "__copy" not in out
+
+
+@respx.mock
+def test_type_word_does_not_hide_supplier_invoices(client: LexwareClient) -> None:
+    respx.get(f"{API}/voucherlist").mock(side_effect=lambda r: page(
+        {"id": U1, "voucherNumber": "4711", "voucherType": "purchaseinvoice"}
+    ) if r.url.params.get("voucherNumber") == "4711" else page())
+    assert services.find_voucher(client, "Rechnung 4711", services.ALL_VOUCHER_TYPES).id == U1
+
+
+@respx.mock
+def test_credit_note_word_is_not_invoice(client: LexwareClient) -> None:
+    respx.get(f"{API}/voucherlist").mock(side_effect=lambda r: page(
+        {"id": U1, "voucherNumber": "RK0001", "voucherType": "creditnote"}
+    ) if r.url.params.get("voucherNumber") == "RK0001" else page())
+    match = services.find_voucher(client, "Rechnungskorrektur RK0001",
+                                  services.ALL_VOUCHER_TYPES)
+    assert match.id == U1
+
+
+@respx.mock
+def test_update_contact_partial_address_object(client: LexwareClient) -> None:
+    current = {"id": U1, "version": 1, "company": {"name": "A"}, "addresses": {"billing": [
+        {"street": "Weg 1", "zip": "50667", "city": "Bonn", "countryCode": "DE"}]}}
+    respx.get(f"{API}/contacts/{U1}").mock(return_value=httpx.Response(200, json=current))
+    put = respx.put(f"{API}/contacts/{U1}").mock(return_value=httpx.Response(200, json={}))
+    services.update_contact(client, U1, {"adresse": {"ort": "Köln"}})
+    billing = json.loads(put.calls[0].request.content)["addresses"]["billing"][0]
+    assert billing == {"street": "Weg 1", "zip": "50667", "city": "Köln", "countryCode": "DE"}
+    services.update_contact(client, U1, {"addresses": {"billing": {"plz": "50668"}}})
+    billing = json.loads(put.calls[1].request.content)["addresses"]["billing"][0]
+    assert billing["zip"] == "50668" and "plz" not in billing
+
+
+def test_days_with_tagen_and_text_label() -> None:
+    out = prepare_document(None, {"zahlungsziel": "30 Tagen", "lineItems": [LINE]}, INVOICE)
+    assert out["paymentConditions"]["paymentTermDuration"] == 30
+    out = prepare_document(None, {"paymentConditions": "Zahlung per Vorkasse",
+                                  "lineItems": [LINE]}, INVOICE)
+    assert out["paymentConditions"] == {"paymentTermLabel": "Zahlung per Vorkasse"}
+    out = prepare_document(None, {"zahlungsziel": "sofort nach Erhalt, spätestens 10 Tagen",
+                                  "lineItems": [LINE]}, INVOICE)
+    assert out["paymentConditions"]["paymentTermDuration"] == 10
+
+
+def test_tax_amount_is_not_a_rate() -> None:
+    with pytest.raises(LexwareError, match="Steuerbetrag"):
+        prepare_voucher({"type": "Quittung", "voucherNumber": "1", "betrag": 43.84,
+                         "kategorie": "Porto", "mwst": "7,00 €"})
+    with pytest.raises(LexwareError, match="ungewöhnlich"):
+        prepare_voucher({"type": "Quittung", "voucherNumber": "1", "betrag": 43.84,
+                         "kategorie": "Porto", "mwst": 3.04})
+
+
+def test_net_amount_receipt() -> None:
+    out = prepare_voucher({"type": "Eingangsrechnung", "voucherNumber": "N1", "netto": 100,
+                           "kategorie": "Bürobedarf"})
+    assert out["taxType"] == "net" and out["totalGrossAmount"] == 119
+
+
+def test_iso_period_and_country_prefixes() -> None:
+    out = prepare_document(None, {"leistungszeitraum": "2026-11-17 bis 2026-11-21",
+                                  "lineItems": [LINE]}, INVOICE)
+    assert out["shippingConditions"]["shippingEndDate"].startswith("2026-11-21")
+    out = prepare_document(None, {"kunde": "Huber GmbH, Ring 1, A-1010 Wien",
+                                  "lineItems": [LINE]}, INVOICE)
+    assert out["address"]["countryCode"] == "AT"
+
+
+@respx.mock
+def test_receipt_item_aliases_before_tax_detection(client: LexwareClient) -> None:
+    out = prepare_voucher({"type": "Eingangsrechnung", "voucherNumber": "A1",
+                           "totalGrossAmount": 119, "voucherItems": [
+                               {"betrag": 119, "steuersatz": 19, "kategorie": "x"}]})
+    assert out["taxType"] == "gross" and out["voucherItems"][0]["taxAmount"] == 19

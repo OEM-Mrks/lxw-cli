@@ -242,14 +242,16 @@ _WORD_PREFIX = re.compile(
 
 
 _TYPE_WORD = re.compile(
-    r"^(rechnung|angebot|auftrag|auftragsbest[äa]tigung|lieferschein|gutschrift|"
-    r"rechnungskorrektur|invoice|quotation|order)\w*\s*[:#]?\s+", re.I)
+    r"^(rechnungskorrektur|auftragsbest[äa]tigung|rechnung|angebot|auftrag|lieferschein|"
+    r"gutschrift|invoice|quotation|order)\w*\s*[:#]?\s+", re.I)
 _WORD_TYPES = {
-    "rechnung": "invoice,salesinvoice,downpaymentinvoice", "invoice": "invoice,salesinvoice,"
-    "downpaymentinvoice", "angebot": "quotation", "quotation": "quotation",
+    "rechnung": "invoice,salesinvoice,downpaymentinvoice,purchaseinvoice",
+    "invoice": "invoice,salesinvoice,downpaymentinvoice,purchaseinvoice",
+    "angebot": "quotation", "quotation": "quotation",
     "auftrag": "orderconfirmation", "auftragsbestätigung": "orderconfirmation",
     "auftragsbestaetigung": "orderconfirmation", "order": "orderconfirmation",
-    "lieferschein": "deliverynote", "gutschrift": "creditnote,salescreditnote",
+    "lieferschein": "deliverynote",
+    "gutschrift": "creditnote,salescreditnote,purchasecreditnote",
     "rechnungskorrektur": "creditnote",
 }
 _INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
@@ -386,11 +388,10 @@ def find_voucher(
     a tie raises with the list of candidates.
     """
     word = _TYPE_WORD.match(str(identifier or "").strip())
-    if word:
-        narrowed = _WORD_TYPES.get(word.group(1).casefold())
-        wanted = [t for t in voucher_type.split(",") if t in (narrowed or "").split(",")]
-        if wanted:
-            voucher_type = ",".join(wanted)
+    if word and not prefer:
+        # the word ("Rechnung 40") decides between same-numbered vouchers; it
+        # does not hide others (a supplier's invoice is a "Rechnung" too)
+        prefer = _WORD_TYPES.get(word.group(1).casefold())
     identifier = _clean_number(identifier)
     if not identifier:
         # An empty voucherNumber filter makes Lexware return EVERY voucher —
@@ -925,6 +926,7 @@ def _list_voucherlist(
             return result
         rows = [r for r in (match.rows or [match.row]) if r
                 and _row_passes(r, status, contact_id, include_archived)]
+        rows.sort(key=lambda r: r is not match.row)  # the best match first
         if rows:
             if match.note:
                 rows[0] = {**rows[0], "hinweis": match.note}
@@ -1358,7 +1360,9 @@ def _resolve_categories(client: LexwareClient, body: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             continue
         value = str(item.get("categoryId") or "").strip()
-        value = _CATEGORY_WORDS.get(fold(value), value)
+        if not looks_like_uuid(value) and not any(
+                fold(str(c.get("name") or "")) == fold(value) for c in categories):
+            value = _CATEGORY_WORDS.get(fold(value), value)
         if not looks_like_uuid(value):
             hits = [
                 c for c in categories
@@ -1453,8 +1457,13 @@ def _same_number_other_date(client: LexwareClient, body: dict[str, Any]) -> str 
         rows = _lookup_number(client, number, BOOKKEEPING_TYPES)
     except Exception:
         return None
-    same = [r for r in rows if not body.get("contactId")
-            or r.get("contactId") == body.get("contactId")]
+    if body.get("contactId"):
+        same = [r for r in rows if r.get("contactId") == body.get("contactId")]
+    elif body.get("contactName"):
+        same = [r for r in rows if _loose(str(r.get("contactName") or ""))
+                == _loose(str(body["contactName"]))]
+    else:
+        same = [r for r in rows if str(r.get("contactName") or "").startswith("Sammel")]
     if not same:
         return None
     dates = ", ".join(sorted({str(r.get("voucherDate") or "")[:10] for r in same}))
@@ -3069,6 +3078,18 @@ def _merge_billing(current: dict[str, Any], changes: dict[str, Any]) -> dict[str
     drop street, zip and country — merge it onto the current first address.
     """
     changes = dict(changes)
+    from lxw_cli.core.normalize import _address_keys
+
+    for key in ("adresse", "anschrift", "address", "rechnungsadresse"):
+        if isinstance(changes.get(key), dict):
+            changes.update({k: v for k, v in _address_keys(changes.pop(key)).items()})
+    addresses_in = changes.get("addresses")
+    if isinstance(addresses_in, dict) and isinstance(addresses_in.get("billing"), (dict, list)):
+        billing_in = addresses_in["billing"]
+        if isinstance(billing_in, dict):
+            billing_in = [billing_in]
+        changes["addresses"] = {**addresses_in, "billing": [
+            _address_keys(b) if isinstance(b, dict) else b for b in billing_in]}
     for german, key in (("strasse", "street"), ("straße", "street"), ("plz", "zip"),
                         ("postleitzahl", "zip"), ("ort", "city"), ("stadt", "city"),
                         ("land", "country"), ("adresszusatz", "supplement")):
