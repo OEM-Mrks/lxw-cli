@@ -304,6 +304,7 @@ def test_voucher_category_by_name_and_duplicate(client: LexwareClient) -> None:
     assert not post.called and "nicht doppelt" in result["hinweis"]
     with pytest.raises(LexwareError, match="Buchungskategorie fehlt"):
         services.create_voucher(client, {"type": "purchaseinvoice", "taxType": "gross",
+                                         "voucherNumber": "R-2",
                                          "voucherItems": [{"amount": 1, "taxRatePercent": 19}]})
 
 
@@ -471,7 +472,7 @@ def test_voucher_tax_type_from_total() -> None:
     items = [{"amount": 100, "taxRatePercent": 19, "categoryId": "x"}]
     assert prepare_voucher({"voucherItems": items, "totalGrossAmount": 119})["taxType"] == "net"
     assert prepare_voucher({"voucherItems": items, "totalGrossAmount": 100})["taxType"] == "gross"
-    with pytest.raises(LexwareError, match="taxType fehlt"):
+    with pytest.raises(LexwareError, match="taxType"):
         prepare_voucher({"voucherItems": items})
 
 

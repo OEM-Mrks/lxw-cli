@@ -53,7 +53,7 @@ def test_resolve_max_items() -> None:
     assert resolve_max_items(25) == 25
     assert resolve_max_items(25, fetch_all=True) is None
     assert resolve_max_items(0) is None
-    assert resolve_max_items(-1) is None
+    assert resolve_max_items(-1) == 25  # a slip, not "everything"
     assert resolve_max_items(0, fetch_all=True) is None
 
 

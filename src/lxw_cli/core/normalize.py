@@ -17,6 +17,26 @@ from typing import Any
 
 from lxw_cli.core.errors import LexwareError
 
+# -- text hygiene ------------------------------------------------------------
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_control(value: Any) -> Any:
+    """Remove control characters (keep tab/newline) from all strings, deeply.
+
+    Lexware answers a NUL byte with HTTP 500 and stores others (e.g. BEL)
+    that later break PDFs/XRechnung.
+    """
+    if isinstance(value, str):
+        return _CONTROL.sub("", value)
+    if isinstance(value, dict):
+        return {k: strip_control(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [strip_control(v) for v in value]
+    return value
+
+
 # -- voucher status ----------------------------------------------------------
 
 # Values /v1/voucherlist accepts for voucherStatus.
@@ -174,8 +194,16 @@ def to_decimal(value: Any, *, field: str) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float, Decimal)):
-        return Decimal(str(value))
+        number = Decimal(str(value))
+        if not number.is_finite():
+            raise LexwareError(f"„{field}“ muss eine endliche Zahl sein (erhalten: {value!r}).")
+        return number
+    if not isinstance(value, str):
+        raise LexwareError(f"„{field}“ muss eine Zahl sein (erhalten: {type(value).__name__}).")
     text = _MONEY_JUNK.sub("", str(value)).replace("%", "").strip()
+    # "100.-" / "100,-" / "2 Stück" / "3 h"
+    text = re.sub(r"[.,]-$", "", text)
+    text = re.sub(r"(?<=\d)[A-Za-zÄÖÜäöüß]{2,}\.?$", "", text)
     if not text:
         return None
     if "," in text and "." in text:
@@ -196,11 +224,14 @@ def to_decimal(value: Any, *, field: str) -> Decimal | None:
             "1500 oder 1.5."
         )
     try:
-        return Decimal(text)
+        number = Decimal(text)
     except InvalidOperation as exc:
         raise LexwareError(
-            f"„{field}“ muss eine Zahl sein, z. B. 49.90 (erhalten: {value!r})."
+            f"„{field}“ muss eine Zahl sein, z. B. 19 oder 49.90 (erhalten: {value!r})."
         ) from exc
+    if not number.is_finite():
+        raise LexwareError(f"„{field}“ muss eine endliche Zahl sein (erhalten: {value!r}).")
+    return number
 
 
 def to_number(value: Any, *, field: str) -> Any:
@@ -340,7 +371,13 @@ def normalize_roles(roles: Any, *, keep_existing: bool = False) -> Any:
     if isinstance(roles, str):
         roles = [part for part in re.split(r"[,;/+]|\bund\b", roles) if part.strip()]
     if isinstance(roles, (list, tuple)):
-        roles = {r: {} for r in roles}
+        merged: dict[str, Any] = {}
+        for entry in roles:
+            if isinstance(entry, dict):
+                merged.update(entry)  # [{"customer": {}}] or [{"vendor": true}]
+            elif entry is not None:
+                merged[str(entry)] = {}
+        roles = merged
     if not isinstance(roles, dict):
         return roles
     out: dict[str, Any] = {}
@@ -373,6 +410,102 @@ def _as_list(value: Any) -> Any:
     return value
 
 
+_GERMAN_FLAT = {
+    "strasse": "street", "straße": "street", "str": "street", "adresse": "street",
+    "plz": "zip", "postleitzahl": "zip", "postcode": "zip", "postal_code": "zip",
+    "ort": "city", "stadt": "city", "town": "city", "land": "country",
+    "adresszusatz": "supplement", "zusatz": "supplement",
+    "mail": "email", "e-mail": "email", "emailadresse": "email",
+    "tel": "phone", "telefonnummer": "phone", "mobil": "mobile",
+    "notiz": "note", "notes": "note", "bemerkung": "note",
+    "rollen": "roles", "rolle": "roles", "role": "roles",
+}
+_PERSON_FLAT = {"vorname": "firstName", "first_name": "firstName", "firstname": "firstName",
+                "nachname": "lastName", "last_name": "lastName", "lastname": "lastName",
+                "anrede": "salutation"}
+_COMPANY_NAME = ("firma", "firmenname", "company_name", "companyName", "unternehmen")
+_PERSON_SALUTATION = re.compile(r"^(Herr|Frau|Hr\.|Fr\.)\s+", re.I)
+
+
+_PERSON_KEYS = {
+                "vorname": "firstName", "nachname": "lastName", "anrede": "salutation",
+                "first_name": "firstName", "last_name": "lastName",
+                "email": "emailAddress", "e-mail": "emailAddress", "mail": "emailAddress",
+                "e_mail": "emailAddress", "telefon": "phoneNumber", "phone": "phoneNumber",
+                "tel": "phoneNumber", "mobil": "phoneNumber", "handy": "phoneNumber"}
+
+
+def _person_keys(person: dict[str, Any]) -> dict[str, Any]:
+    """German/flat keys inside a person or contact person."""
+    out = dict(person)
+    for alias, target in _PERSON_KEYS.items():
+        if alias in out and target not in out:
+            out[target] = out.pop(alias)
+    return out
+
+
+def _person_from_text(text: str) -> dict[str, Any]:
+    """"Frau Petra Klein" → {salutation: Frau, firstName: Petra, lastName: Klein}."""
+    text = text.strip()
+    person: dict[str, Any] = {}
+    m = _PERSON_SALUTATION.match(text)
+    if m:
+        word = m.group(1).rstrip(".").lower()
+        person["salutation"] = "Herr" if word.startswith("h") else "Frau"
+        text = text[m.end():]
+    parts = text.split()
+    if parts:
+        person["lastName"] = parts[-1]
+        if len(parts) > 1:
+            person["firstName"] = " ".join(parts[:-1])
+    return person
+
+
+def _german_contact_fields(body: dict[str, Any]) -> dict[str, Any]:
+    """German/flat field names (strasse, plz, ort, vorname, firma, ansprechpartner,
+    kunde: true …) → the structure Lexware expects."""
+    if isinstance(body.get("company"), str):
+        body["company"] = {"name": body["company"]}
+    for alias, target in _GERMAN_FLAT.items():
+        if alias in body and target not in body:
+            body[target] = body.pop(alias)
+    for key in _COMPANY_NAME:
+        if key in body:
+            body["company"] = {**(body.get("company") or {}), "name": body.pop(key)}
+    person_bits = {_PERSON_FLAT[k]: body.pop(k) for k in list(body) if k in _PERSON_FLAT}
+    contact_person = None
+    for key in ("ansprechpartner", "contactPerson", "contact_person", "contactPersons",
+                "ansprechpartnerin", "kontaktperson"):
+        if key in body:
+            contact_person = body.pop(key)
+    if isinstance(contact_person, str):
+        contact_person = _person_from_text(contact_person)
+    if isinstance(contact_person, dict):
+        contact_person = [contact_person]
+    if isinstance(body.get("company"), dict) or contact_person:
+        company = dict(body.get("company") or {})
+        persons = contact_person or company.get("contactPersons")
+        if person_bits:
+            persons = [{**((persons or [{}])[0]), **person_bits}]
+        if persons:
+            company["contactPersons"] = persons
+        body["company"] = company
+    elif person_bits:
+        body["person"] = {**(body.get("person") or {}), **person_bits}
+    roles = body.get("roles")
+    for flag, role in (("customer", "customer"), ("kunde", "customer"),
+                       ("vendor", "vendor"), ("lieferant", "vendor"),
+                       ("isCustomer", "customer"), ("isVendor", "vendor")):
+        if flag in body and isinstance(body[flag], bool | str | dict):
+            value = body.pop(flag)
+            if value is False or str(value).lower() in ("false", "nein", "no"):
+                continue
+            roles = {**(roles if isinstance(roles, dict) else {}), role: {}}
+    if roles is not None:
+        body["roles"] = roles
+    return body
+
+
 def normalize_contact(body: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
     """Repair a contact body before it goes to Lexware.
 
@@ -384,7 +517,24 @@ def normalize_contact(body: dict[str, Any], *, partial: bool = False) -> dict[st
     """
     if not isinstance(body, dict):
         return body
-    body = dict(body)
+    body = _german_contact_fields(strip_control(dict(body)))
+    for key in ("id", "version", "organizationId", "createdDate", "updatedDate"):
+        if partial:
+            body.pop(key, None)  # echoed from a read — the server sets these
+    if isinstance(body.get("company"), str):
+        body["company"] = {"name": body["company"]}
+    if isinstance(body.get("person"), dict):
+        body["person"] = _person_keys(body["person"])
+    company = body.get("company")
+    if isinstance(company, dict):
+        for flag in ("allowTaxFreeInvoices",):
+            if isinstance(company.get(flag), str):
+                company[flag] = company[flag].strip().casefold() in ("ja", "yes", "true", "1")
+        persons = company.get("contactPersons")
+        if isinstance(persons, list):
+            company["contactPersons"] = [
+                _person_keys(p) if isinstance(p, dict) else p for p in persons
+            ]
     # flat contact data
     for flat, group, sub in (
         ("email", "emailAddresses", "business"),
@@ -523,6 +673,10 @@ _ARTICLE_ALIASES = {
     "beschreibung": "description",
     "articleType": "type",
     "article_type": "type",
+    "typ": "type",
+    "artikelart": "type",
+    "gtin_ean": "gtin",
+    "ean": "gtin",
     "art": "type",
 }
 _PRICE_KEYS = {"netPrice", "grossPrice", "leadingPrice", "taxRate"}
@@ -550,10 +704,18 @@ def normalize_article(body: dict[str, Any], *, article_type_map: dict[str, str])
     """
     if not isinstance(body, dict):
         return body
+    body = strip_control(body)
     out: dict[str, Any] = {}
-    price = dict(body.get("price") or {}) if isinstance(body.get("price"), dict) else {}
+    raw_price = body.get("price", body.get("preis"))
+    if isinstance(raw_price, dict):
+        price = dict(raw_price)
+    elif raw_price is not None and not isinstance(raw_price, bool):
+        # "price": 19.9 → net price (19 % unless a taxRate is given)
+        price = {"netPrice": raw_price}
+    else:
+        price = {}
     for key, value in body.items():
-        if key == "price":
+        if key in ("price", "preis"):
             continue
         target = _ARTICLE_ALIASES.get(key, key)
         if key in _PRICE_KEYS or key in _PRICE_ALIASES:

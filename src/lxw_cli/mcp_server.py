@@ -809,6 +809,8 @@ def list_invoices(
     voucher_number: str | None = None,
     contact_id: str | None = None,
     include_archived: bool = False,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> list[dict[str, Any]]:
     """List invoices (salesinvoice/invoice/downpaymentinvoice).
 
@@ -822,6 +824,8 @@ def list_invoices(
     include_archived: archived invoices are excluded by default; set True to
         include them (filtered server-side).
     limit: max results to return; set to 0 to fetch all (paginates internally).
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
+        e.g. for the revenue of a month.
     """
     return services.list_invoices(
         _client_get(),
@@ -830,6 +834,8 @@ def list_invoices(
         contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
+        date_from=date_from,
+        date_to=date_to,
     ).items
 
 
@@ -922,6 +928,8 @@ def list_vouchers(
     voucher_number: str | None = None,
     contact_id: str | None = None,
     include_archived: bool = False,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> list[dict[str, Any]]:
     """List vouchers (all types — invoices, credit notes, purchase invoices etc.).
 
@@ -937,6 +945,8 @@ def list_vouchers(
     voucher_number: finds the voucher whatever its type ('6' → RE0006).
     Archived vouchers are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all (paginates internally).
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
+        e.g. for the revenue of a month.
     """
     return services.list_vouchers(
         _client_get(),
@@ -946,6 +956,8 @@ def list_vouchers(
         contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
+        date_from=date_from,
+        date_to=date_to,
     ).items
 
 
@@ -962,7 +974,9 @@ def get_voucher(identifier: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def list_posting_categories(category_type: str | None = None) -> list[dict[str, Any]]:
+def list_posting_categories(
+    category_type: str | None = None, search: str | None = None
+) -> list[dict[str, Any]]:
     """List the bookkeeping categories available in this account.
 
     These are the categories a bookkeeping voucher is assigned to (e.g.
@@ -971,10 +985,11 @@ def list_posting_categories(category_type: str | None = None) -> list[dict[str, 
     book to?". `category_type` optionally narrows the list: 'income'
     (Einnahmen) or 'outgo' (Ausgaben; 'expense' works too). Returns each
     category's id, name and type. A voucher may also name its category instead
-    of the id — it is looked up here.
+    of the id — it is looked up here. `search` filters by part of the name or
+    group (e.g. 'Kraftstoff', 'Büro', 'Miete').
     """
     return services.list_posting_categories(
-        _client_get(), category_type=category_type
+        _client_get(), category_type=category_type, search=search
     )
 
 
@@ -1034,6 +1049,8 @@ def list_quotations(
     voucher_number: str | None = None,
     contact_id: str | None = None,
     include_archived: bool = False,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> list[dict[str, Any]]:
     """List quotations (Angebote).
 
@@ -1045,6 +1062,8 @@ def list_quotations(
     contact_id: filter by customer UUID.
     Archived quotations are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all quotations (paginates internally).
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
+        e.g. for the revenue of a month.
     """
     return services.list_quotations(
         _client_get(),
@@ -1053,6 +1072,8 @@ def list_quotations(
         contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
+        date_from=date_from,
+        date_to=date_to,
     ).items
 
 
@@ -1083,6 +1104,8 @@ def list_order_confirmations(
     voucher_number: str | None = None,
     contact_id: str | None = None,
     include_archived: bool = False,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> list[dict[str, Any]]:
     """List order confirmations (Aufträge).
 
@@ -1094,6 +1117,8 @@ def list_order_confirmations(
     contact_id: filter by customer UUID.
     Archived orders are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all (paginates internally).
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
+        e.g. for the revenue of a month.
     """
     return services.list_order_confirmations(
         _client_get(),
@@ -1102,6 +1127,8 @@ def list_order_confirmations(
         contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
+        date_from=date_from,
+        date_to=date_to,
     ).items
 
 
@@ -1135,6 +1162,8 @@ def list_delivery_notes(
     voucher_number: str | None = None,
     contact_id: str | None = None,
     include_archived: bool = False,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> list[dict[str, Any]]:
     """List delivery notes (Lieferscheine).
 
@@ -1146,6 +1175,8 @@ def list_delivery_notes(
     contact_id: filter by customer UUID.
     Archived delivery notes are excluded by default; set include_archived=True
     to include them. Set limit=0 to fetch all (paginates internally).
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
+        e.g. for the revenue of a month.
     """
     return services.list_delivery_notes(
         _client_get(),
@@ -1154,6 +1185,8 @@ def list_delivery_notes(
         contact_id=contact_id,
         include_archived=include_archived,
         limit=limit,
+        date_from=date_from,
+        date_to=date_to,
     ).items
 
 
@@ -1605,42 +1638,54 @@ def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool
-def continue_document(identifier: str, target: str) -> dict[str, Any]:
+def continue_document(
+    identifier: str,
+    target: str,
+    changes: dict[str, Any] | None = None,
+    allow_duplicate: bool = False,
+) -> dict[str, Any]:
     """Continue a document into its follow-up, keeping them linked (Belegkette).
 
     Use when the user wants to carry a document forward to the next step. The
-    content (customer, positions, texts) is taken over and both documents stay
-    linked. The follow-up is created as a draft. The source type is detected
-    automatically from `identifier`.
+    customer (incl. contact person), positions (incl. article link, description,
+    discounts), overall discount, payment and delivery terms are taken over;
+    title, introduction and closing text are the standard texts of the new
+    type (as in the Lexware web app). The follow-up is created as a draft.
 
     `identifier`: the source document's number or id.
-    `target`: the follow-up to create. Supported paths (same as in Lexware):
-        - from a quotation (Angebot): 'Auftrag', 'Lieferschein' or 'Rechnung'
-        - from an order confirmation (Auftrag): 'Lieferschein' or 'Rechnung'
-        - from a delivery note (Lieferschein): 'Rechnung'
-        - from an invoice (Rechnung): 'Lieferschein' or 'Rechnungskorrektur'
-    Article positions keep their link to the article; the source's own
-    title/introduction/closing text are not taken over (Lexware uses the
-    standard texts of the new type). A quotation may still be a draft; for a
-    Rechnungskorrektur or a dunning the invoice must be finalized and open —
-    reported clearly if not. 'Abschlags-
-    rechnung' and 'Serienrechnung' cannot be created via the interface (only in
-    Lexware directly). Unsupported steps are reported clearly.
+    `target`: Auftrag/AB, Lieferschein/LS, Rechnung/RE, Rechnungskorrektur/
+        Gutschrift/Storno, Mahnung. Paths (same as in Lexware): quotation →
+        order/delivery note/invoice; order → delivery note/invoice; delivery
+        note → invoice; invoice → delivery note/credit note/dunning.
+    `changes` (optional): adjustments for the new document, e.g.
+        {"lieferdatum": "20.11.2026"}, {"zahlungsziel": 14},
+        {"voucherDate": "heute"}, {"title": "…"} or — for a PARTIAL credit
+        note — {"lineItems": [{"type": "custom", "name": "Gutschrift
+        Reklamation", "quantity": 1, "unitPrice": {"netAmount": 42.02,
+        "taxRatePercentage": 19}}]}. Without lineItems a credit note covers
+        the WHOLE invoice (= Storno).
+    `allow_duplicate`: a second follow-up of the same type (e.g. a second
+        invoice from one order) is refused unless this is true.
+    Notes: an order or delivery note must be finalized in Lexware before it
+    can be continued; a quotation draft is finalized by Lexware on the way.
+    Quotations with optional/alternative positions cannot be continued via
+    the interface. Result: number, type, totals and a `hinweis`.
     """
-    return services.continue_document(_client_get(), identifier, target)
+    return services.continue_document(
+        _client_get(), identifier, target, changes=changes, allow_duplicate=allow_duplicate
+    )
 
 
 @mcp.tool
 def create_dunning(identifier: str) -> dict[str, Any]:
     """Create a dunning (Mahnung / payment reminder) from an overdue invoice.
 
-    Use when the user wants to remind a customer about an unpaid invoice.
-    `identifier` is the invoice's number (e.g. 'FB2600682') or id. The invoice
-    must already be finalized and still have an open amount — otherwise this
-    reports the reason clearly. The dunning is created as a draft and stays
-    linked to the invoice; creating another one for the same invoice raises the
-    reminder to the next level. Note the returned id — a dunning can only be
-    opened again by its id, not by a number.
+    `identifier`: the invoice's number (e.g. 'FB2600682') or id. With a
+    customer name instead, the customer's overdue invoices are listed. The
+    invoice must be finalized and still open — otherwise the reason is
+    reported. The dunning is a draft linked to the invoice; each further one
+    is the next level (titled e.g. "2. Mahnung"). Later retrieval works with
+    the dunning's id, its number (e.g. 'RE0001_2') or the invoice number.
     """
     return services.create_dunning(_client_get(), identifier)
 

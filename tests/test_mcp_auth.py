@@ -24,6 +24,12 @@ from lxw_cli.mcp_auth import (
 
 LEXWARE_API = "https://api.lexware.io"
 
+_ITEM = {
+    "taxType": "gross",
+    "voucherItems": [{"amount": 119, "taxRatePercent": 19,
+                      "categoryId": "16d04a21-fd91-11e1-a21f-0800200c9a66"}],
+}
+
 
 # ---------------------------------------------------------------------------
 # Unit level
@@ -883,7 +889,8 @@ async def test_voucher_upload_link_end_to_end(server: str) -> None:
         async with Client(f"{server}/mcp", auth=raw_key) as mc:
             result = await mc.call_tool(
                 "create_voucher_draft",
-                {"body": {"type": "purchaseinvoice", "voucherNumber": "100123"}},
+                {"body": {"type": "purchaseinvoice", "voucherNumber": "100123",
+                          **_ITEM}},
             )
         info = result.data["fileUpload"]
         assert result.data["id"] == _VID
@@ -972,7 +979,8 @@ async def test_thumbnail_base64_books_voucher_and_offers_link(server: str) -> No
             result = await mc.call_tool(
                 "create_voucher_draft",
                 {
-                    "body": {"type": "purchaseinvoice"},
+                    "body": {"type": "purchaseinvoice", "voucherNumber": "Q-1",
+                             **_ITEM},
                     "file_base64": base64.b64encode(_thumbnail_jpeg()).decode(),
                     "filename": "beleg.jpg",
                 },

@@ -141,7 +141,12 @@ class UploadLinks:
             content = await item.read(MAX_UPLOAD_BYTES + 1)
             name = safe_filename(item.filename or "beleg")
             if len(content) > MAX_UPLOAD_BYTES:
-                results.append({"filename": name, "ok": False, "error": "Datei zu groß."})
+                limit_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+                results.append({"filename": name, "ok": False,
+                                "error": f"Datei zu groß – höchstens {limit_mb} MB."})
+                continue
+            if not content:
+                results.append({"filename": name, "ok": False, "error": "Die Datei ist leer."})
                 continue
             name, ctype = services.upload_name_and_type(name, content, None)
             if ctype not in ACCEPTED_TYPES:
