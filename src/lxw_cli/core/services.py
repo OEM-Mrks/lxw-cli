@@ -514,9 +514,13 @@ def _prepare_doc(client: LexwareClient, body: dict[str, Any], kind: str) -> dict
     elif not contact and address.get("name"):
         hit = _unique_contact_by_name(client, str(address["name"]))
         if hit:
-            address["contactId"] = hit
-            if not had_country:
-                address.pop("countryCode", None)  # the contact's own country applies
+            # Only the id: with a name next to it Lexware treats the address as
+            # a full custom one and demands countryCode etc. (seen live).
+            keep = {"contactPerson"} | ({"countryCode"} if had_country else set())
+            body["address"] = {
+                "contactId": hit,
+                **{k: v for k, v in address.items() if k in keep},
+            }
     return body
 
 
@@ -2126,7 +2130,8 @@ def _dunning_id(client: LexwareClient, value: str) -> tuple[str, str | None]:
         ) from exc
     dunnings = [
         r for r in invoice.get("relatedVouchers") or []
-        if isinstance(r, dict) and str(r.get("voucherType")).lower() == "dunning"
+        # Lexware lists them as voucherType "dun" (seen live 10.11.2026)
+        if isinstance(r, dict) and str(r.get("voucherType")).lower() in ("dun", "dunning")
     ]
     number = invoice.get("voucherNumber") or invoice_ref
     if not dunnings:
