@@ -149,9 +149,13 @@ def document_timestamp(value: Any) -> Any:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return value
-    # Day and time as written count (no time-zone shift — "2026-11-10T23:30Z"
-    # stays the 10th, not 00:30 on the 11th in Berlin).
-    return _format(parsed.replace(tzinfo=None))
+    # Day and time as written count. An explicit offset like +01:00 is kept;
+    # "Z"/+00:00 (what models append by habit) is read as Berlin wall-clock
+    # time, so "2026-11-10T23:30Z" stays the 10th instead of 00:30 on the 11th.
+    offset = parsed.utcoffset()
+    if offset is None or offset.total_seconds() == 0:
+        return _format(parsed.replace(tzinfo=None))
+    return parsed.isoformat(timespec="milliseconds")
 
 
 # -- Sales documents (quotation, invoice, order confirmation, delivery note) --
