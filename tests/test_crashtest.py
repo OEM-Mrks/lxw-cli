@@ -360,8 +360,8 @@ def test_dunning_by_invoice_number(client: LexwareClient) -> None:
     ) if r.url.params.get("voucherNumber") in ("RE0001", None) else page())
     respx.get(f"{API}/invoices/{U1}").mock(return_value=httpx.Response(200, json={
         "id": U1, "voucherNumber": "RE0001", "relatedVouchers": [
-            {"id": U2, "voucherNumber": "RE0001_1", "voucherType": "dunning"},
-            {"id": U3, "voucherNumber": "RE0001_2", "voucherType": "dunning"},
+            {"id": U2, "voucherNumber": "RE0001_1", "voucherType": "dun"},
+            {"id": U3, "voucherNumber": "RE0001_2", "voucherType": "dun"},
         ],
     }))
     respx.get(f"{API}/dunnings/{U3}").mock(return_value=httpx.Response(200, json={"id": U3}))
@@ -522,3 +522,15 @@ def test_pdf_refuses_silent_pick(client: LexwareClient) -> None:
     ))
     with pytest.raises(LexwareError, match="über seine id"):
         services.download_pdf(client, "1001", services.ALL_VOUCHER_TYPES)
+
+
+@respx.mock
+def test_customer_by_name_sends_only_contact_id(client: LexwareClient) -> None:
+    """Live 10.11.: Name + contactId → Lexware verlangt die ganze Adresse."""
+    respx.get(f"{API}/contacts").mock(
+        return_value=page({"id": U1, "company": {"name": "CloudKontor AG"}})
+    )
+    post = respx.post(f"{API}/invoices").mock(return_value=httpx.Response(200, json={"id": U2}))
+    services.create_invoice(client, {"customer": "CloudKontor AG", "lineItems": [
+        {"type": "custom", "name": "A", "unitPrice": {"netAmount": 1}}]})
+    assert json.loads(post.calls[0].request.content)["address"] == {"contactId": U1}
