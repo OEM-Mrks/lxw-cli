@@ -304,6 +304,8 @@ def _raw_message(response: httpx.Response) -> str:
 def _one_of(match: re.Match[str]) -> str:
     value, field, allowed = match.group(1), match.group(2), match.group(3)
     options = [o.strip() for o in allowed.split(",") if o.strip()]
+    if "taxtype" in field.lower():
+        return f"Ungültige Steuerart '{value}' für „{field}“. Erlaubt: {', '.join(options)}."
     if "countrycode" in field.lower() or len(options) > 15:
         hint = "bitte als ISO-Code, z. B. DE, AT, CH" if "country" in field.lower() else (
             f"{len(options)} mögliche Werte, z. B. {', '.join(options[:5])}"
@@ -383,6 +385,20 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
     (re.compile(r"invalid taxrate(?:percentage)?(?: or does not match booking date or "
                 r"country code)?\.?", re.I),
      "ungültiger Steuersatz (möglich: 0, 7 oder 19 %, passend zu Datum und Land)"),
+    (re.compile(r"Referenced contact needs to have exactly one billing address[^.\n]*\.?",
+                re.I),
+     "Der gewählte Kontakt hat keine (oder mehrere) Rechnungsadressen – bitte in Lexware "
+     "genau eine Rechnungsadresse eintragen."),
+    (re.compile(r"contact must be vendor", re.I),
+     "der Kontakt ist kein Lieferant – für Eingangsbelege einen Lieferanten-Kontakt wählen"),
+    (re.compile(r"contact must be customer", re.I),
+     "der Kontakt ist kein Kunde – für Ausgangsbelege einen Kunden-Kontakt wählen"),
+    (re.compile(r"amount must be posit\w* bookkeeping voucher", re.I),
+     "Beträge im Buchhaltungsbeleg müssen positiv sein (Gutschriften als eigene Belegart)"),
+    (re.compile(r"NO_SOURCE:\s*"), ""),
+    (re.compile(r"Invalid combination of tax type[^.\n]*\.?", re.I),
+     "Diese Steuerart passt nicht zu Kontakt, Land oder Positionen (z. B. §13b nur mit "
+     "Unternehmer-Kunde und Steuersatz 0 %). Bitte Steuerart bzw. Steuersätze prüfen."),
     (re.compile(r"Line items in vatfree invoices must not contain taxes\.?", re.I),
      "Bei steuerfreien Belegen (z. B. innergemeinschaftliche Lieferung) muss der "
      "Steuersatz jeder Position 0 % sein."),

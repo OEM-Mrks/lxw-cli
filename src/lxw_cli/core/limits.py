@@ -82,11 +82,12 @@ def validate_voucher(body: dict[str, Any]) -> None:
     if isinstance(title, str):
         # Lexware stores & < > escaped (&amp; …) and counts that length.
         stored = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        if len(stored) > VOUCHER_TITLE_MAX:
+        stored_len = len(stored.encode("utf-16-le")) // 2
+        if stored_len > VOUCHER_TITLE_MAX:
             extra = " (& < > zählen bei Lexware als 4–5 Zeichen)" if stored != title else ""
             violations.append(
                 f"Der Belegtitel darf höchstens {VOUCHER_TITLE_MAX} Zeichen haben "
-                f"(aktuell {len(stored)}{extra})."
+                f"(aktuell {stored_len}{extra})."
             )
     _check(
         body.get("introduction"),
@@ -108,6 +109,15 @@ def validate_voucher(body: dict[str, Any]) -> None:
                 f"Die Bezeichnung von Position {index}",
                 violations,
             )
+            name = item.get("name")
+            if isinstance(name, str) and any(c in name for c in "&<>"):
+                stored = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                if len(stored.encode("utf-16-le")) // 2 > 255:
+                    violations.append(
+                        f"Die Bezeichnung von Position {index} ist mit & < > zu lang "
+                        "(Lexware zählt & als 5 Zeichen, höchstens 255) – bitte „und“ "
+                        "statt „&“ schreiben oder kürzen."
+                    )
             _check(
                 item.get("description"),
                 LINE_ITEM_DESCRIPTION_MAX,
