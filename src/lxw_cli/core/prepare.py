@@ -21,7 +21,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from lxw_cli.core.errors import LexwareAPIError, LexwareError
-from lxw_cli.core.normalize import country_code, fold, to_number
+from lxw_cli.core.normalize import country_code, fold, strip_control, to_number
 
 if TYPE_CHECKING:
     from lxw_cli.core.client import LexwareClient
@@ -78,6 +78,29 @@ _RELATIVE_DAYS = {
 }
 
 
+_MONTHS = {
+    "jan": 1, "januar": 1, "january": 1, "jänner": 1, "feb": 2, "februar": 2,
+    "february": 2, "mär": 3, "mrz": 3, "märz": 3, "maerz": 3, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "mai": 5, "may": 5, "jun": 6, "juni": 6, "june": 6,
+    "jul": 7, "juli": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9,
+    "september": 9, "okt": 10, "oktober": 10, "oct": 10, "october": 10, "nov": 11,
+    "november": 11, "dez": 12, "dezember": 12, "dec": 12, "december": 12,
+}
+
+
+def _named_month(value: str) -> tuple[int, int, int] | None:
+    """"10. November 2026", "10 Nov 2026", "Nov 10, 2026" → (y, m, d)."""
+    text = value.strip().casefold().replace(",", " ").replace(".", " ")
+    parts = text.split()
+    if len(parts) != 3:
+        return None
+    for d_i, m_i in ((0, 1), (1, 0)):
+        month = _MONTHS.get(parts[m_i])
+        if month and parts[d_i].isdigit() and parts[2].isdigit() and len(parts[2]) == 4:
+            return int(parts[2]), month, int(parts[d_i])
+    return None
+
+
 def _parse_day(value: str) -> date | None:
     word = value.strip().casefold()
     if word in _RELATIVE_DAYS:
@@ -94,13 +117,20 @@ def _parse_day(value: str) -> date | None:
         y, mo, d = (int(g) for g in m.groups())
     else:
         m = _GERMAN_DATE_RE.match(value)
-        if not m:
-            return None
-        d, mo, y = (int(g) for g in m.groups())
+        if m:
+            d, mo, y = (int(g) for g in m.groups())
+        else:
+            named = _named_month(value)
+            if not named:
+                return None
+            y, mo, d = named
     try:
         return date(y, mo, d)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise LexwareError(
+            f"Das Datum '{value.strip()}' gibt es nicht (Tag oder Monat außerhalb des "
+            "Kalenders)."
+        ) from exc
 
 
 def document_timestamp(value: Any) -> Any:
@@ -119,7 +149,9 @@ def document_timestamp(value: Any) -> Any:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return value
-    return _format(parsed)
+    # Day and time as written count (no time-zone shift — "2026-11-10T23:30Z"
+    # stays the 10th, not 00:30 on the 11th in Berlin).
+    return _format(parsed.replace(tzinfo=None))
 
 
 # -- Sales documents (quotation, invoice, order confirmation, delivery note) --
@@ -159,11 +191,44 @@ _DOC_ALIASES = {
     "valid_until": "expirationDate",
     "subject": "title", "betreff": "title", "intro": "introduction",
     "einleitung": "introduction", "closing": "remark", "schlusstext": "remark",
-    "footer": "remark",
+    "footer": "remark", "titel": "title", "einleitungstext": "introduction",
+    "nachbemerkung": "remark", "bemerkung": "remark", "closingText": "remark",
+    "gueltig_bis": "expirationDate", "gültig_bis": "expirationDate",
+    "gueltigbis": "expirationDate", "gültigbis": "expirationDate",
+    "ablaufdatum": "expirationDate", "expiration_date": "expirationDate",
+    "rechnungsdatum": "voucherDate", "angebotsdatum": "voucherDate",
+    "invoice_date": "voucherDate", "voucher_date": "voucherDate",
+    "document_date": "voucherDate", "quotationDate": "voucherDate",
+    "zahlbar_bis": "dueDate", "zahlbarBis": "dueDate", "due_date": "dueDate",
+    "faellig_am": "dueDate", "fällig_am": "dueDate", "payableUntil": "dueDate",
+    "zahlungsbedingungen": "paymentConditions", "payment_conditions": "paymentConditions",
+    "lieferbedingungen": "deliveryTerms", "delivery_terms": "deliveryTerms",
+    "lieferbedingung": "deliveryTerms", "sprache": "language",
 }
+# Fields Lexware's document endpoints know (create + what reads return).
+_DOC_FIELDS = frozenset({
+    "id", "organizationId", "createdDate", "updatedDate", "version", "language",
+    "archived", "voucherStatus", "voucherNumber", "voucherDate", "expirationDate",
+    "address", "lineItems", "totalPrice", "taxAmounts", "taxConditions",
+    "paymentConditions", "shippingConditions", "relatedVouchers", "printLayoutId",
+    "introduction", "remark", "title", "files", "electronicDocumentProfile",
+    "closingInvoice", "deliveryTerms", "xRechnung", "deliveryDate", "dueDate",
+    "nextReminderDate", "eInvoiceProfile", "hinweis",
+})
+_LINE_FIELDS = frozenset({
+    "id", "type", "name", "description", "quantity", "unitName", "unitPrice",
+    "discountPercentage", "lineItemAmount", "optional", "alternative", "subItems",
+})
+_DISCOUNT_KEYS = ("rabatt_prozent", "rabattProzent", "gesamtrabatt", "rabatt",
+                  "discount", "discountPercentage", "totalDiscountPercentage")
+_CUSTOMER_KEYS = ("customer", "kunde", "kunde_name", "kundenname", "customerName",
+                  "customer_name", "empfaenger", "empfänger", "recipient")
+_ZIP_RE = re.compile(r"\b(\d{5})\s+([^,]+)$")
 _CONTACT_KEYS = ("contactId", "customerId", "contact_id", "customer_id", "kundeId")
 _LINE_ALIASES = {
-    "title": "name", "bezeichnung": "name", "text": "name",
+    "title": "name", "bezeichnung": "name", "text": "name", "artikel_name": "name",
+    "positionsname": "name", "leistung": "name",
+    "rabatt_prozent": "discountPercentage", "rabattProzent": "discountPercentage",
     "unit": "unitName", "einheit": "unitName", "unit_name": "unitName",
     "menge": "quantity", "qty": "quantity", "anzahl": "quantity",
     "beschreibung": "description", "articleId": "id", "article_id": "id",
@@ -175,6 +240,10 @@ _LINE_PRICE_KEYS = {
     "grossPrice": "grossAmount", "grossAmount": "grossAmount", "brutto": "grossAmount",
     "vat": "taxRatePercentage", "tax": "taxRatePercentage", "taxRate": "taxRatePercentage",
     "ust": "taxRatePercentage", "mwst": "taxRatePercentage",
+    "einzelpreis": "amount", "stueckpreis": "amount", "stückpreis": "amount",
+    "nettopreis": "netAmount", "netto_preis": "netAmount", "bruttopreis": "grossAmount",
+    "brutto_preis": "grossAmount", "preis_netto": "netAmount",
+    "preis_brutto": "grossAmount", "steuer": "taxRatePercentage",
     "taxRatePercentage": "taxRatePercentage", "steuersatz": "taxRatePercentage",
 }
 _LINE_TYPES = {
@@ -209,7 +278,25 @@ def _days(value: Any) -> Any:
     return value
 
 
+def _lower_keys(out: dict[str, Any], known: Any) -> None:
+    """"Positionen", "Titel", "VoucherDate" → the spelling the tables use."""
+    lookup = {k.casefold(): k for k in known}
+    for key in list(out):
+        canon = lookup.get(key.casefold())
+        if canon and canon != key and canon not in out:
+            out[canon] = out.pop(key)
+
+
 def _apply_aliases(out: dict[str, Any]) -> None:
+    _lower_keys(out, [*_DOC_ALIASES, *_DOC_FIELDS, *_CUSTOMER_KEYS, *_CONTACT_KEYS,
+                      *_DISCOUNT_KEYS, "kundennummer", "customerNumber"])
+    for key in ("kundennummer", "customerNumber"):
+        if key in out:
+            out.setdefault("customer", out.pop(key))
+    if isinstance(out.get("language"), str):
+        out["language"] = {"deutsch": "de", "german": "de", "englisch": "en",
+                           "english": "en"}.get(out["language"].strip().casefold(),
+                                                out["language"])
     for alias, target in _DOC_ALIASES.items():
         if alias in out and target not in out:
             out[target] = out.pop(alias)
@@ -221,11 +308,44 @@ def _apply_aliases(out: dict[str, Any]) -> None:
             address = out.get("address") if isinstance(out.get("address"), dict) else {}
             if value and not address.get("contactId"):
                 out["address"] = {**address, "contactId": value}
-    customer = out.pop("customer", None) or out.pop("kunde", None)
+    customer = None
+    for key in _CUSTOMER_KEYS:
+        if key in out:
+            customer = customer or out.pop(key)
+            out.pop(key, None)
     if customer and not out.get("address"):
-        out["address"] = (
-            customer if isinstance(customer, dict) else {"name": str(customer)}
-        )
+        out["address"] = _customer_address(customer)
+    for key in _DISCOUNT_KEYS:
+        if key in out:
+            value = out.pop(key)
+            total = out.get("totalPrice") if isinstance(out.get("totalPrice"), dict) else {}
+            out["totalPrice"] = {
+                **total,
+                "totalDiscountPercentage": to_number(value, field="totalDiscountPercentage"),
+            }
+
+
+def _customer_address(customer: Any) -> dict[str, Any]:
+    """A `customer`/`kunde` value → address.
+
+    A dict is the address itself. A string is a REFERENCE to an existing
+    contact (id, number or exact name — resolved later, never stored as a bare
+    address name). Only a string that clearly is a postal address ("Name,
+    Straße 1, 12345 Ort") becomes a one-off address.
+    """
+    if isinstance(customer, dict):
+        return customer
+    text = str(customer).strip()
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) >= 2:
+        m = _ZIP_RE.search(parts[-1])
+        if m:
+            address: dict[str, Any] = {"name": parts[0], "zip": m.group(1),
+                                       "city": m.group(2).strip()}
+            if len(parts) >= 3:
+                address["street"] = parts[1]
+            return address
+    return {"contactId": text}
 
 
 def _due_and_delivery(out: dict[str, Any], kind: str) -> None:
@@ -284,6 +404,62 @@ def _due_and_delivery(out: dict[str, Any], kind: str) -> None:
             }
 
 
+def prepare_changes(changes: dict[str, Any], kind: str, tax_type: str) -> dict[str, Any]:
+    """Normalize adjustments for a follow-up document (continue_document)."""
+    out = strip_control(copy.deepcopy(changes))
+    _apply_aliases(out)
+    if out.get("voucherDate"):
+        out["voucherDate"] = document_timestamp(out["voucherDate"])
+    if isinstance(out.get("lineItems"), (list, dict)):
+        items = out["lineItems"] if isinstance(out["lineItems"], list) else [out["lineItems"]]
+        out["lineItems"] = [
+            _normalize_line(i, tax_type) if isinstance(i, dict) else i for i in items
+        ]
+        for item in out["lineItems"]:
+            if isinstance(item, dict) and item.get("type") != "text":
+                item.setdefault("quantity", 1)
+                if item.get("type") == "custom":
+                    item.setdefault("unitName", "Stück")
+                price = item.get("unitPrice")
+                if isinstance(price, dict):
+                    price.setdefault("currency", "EUR")
+                    price.setdefault("taxRatePercentage", DEFAULT_TAX_RATE)
+    known = kind in (INVOICE, ORDER_CONFIRMATION, DELIVERY_NOTE)
+    _due_and_delivery(out, kind if known else INVOICE)
+    ship = out.get("shippingConditions")
+    if isinstance(ship, dict):
+        for key in ("shippingDate", "shippingEndDate"):
+            if ship.get(key):
+                ship[key] = document_timestamp(ship[key])
+    _check_fields(out)
+    return out
+
+
+def _check_fields(out: dict[str, Any]) -> None:
+    """Unknown fields raise — Lexware would drop them silently (e.g. a
+    validity date under a made-up name) and the document comes out wrong."""
+    unknown = sorted(k for k in out if k not in _DOC_FIELDS)
+    if unknown:
+        raise LexwareError(
+            f"Unbekannte Felder im Beleg: {', '.join(unknown)} – sie würden von Lexware "
+            "ignoriert. Erlaubt sind u. a.: address (oder customer/kunde), voucherDate "
+            "(Datum), expirationDate (gültig bis), title, introduction, remark, "
+            "lineItems, paymentConditions (oder dueDate/zahlungsziel), "
+            "shippingConditions (oder lieferdatum/leistungsdatum), deliveryTerms, "
+            "totalPrice.totalDiscountPercentage (Gesamtrabatt)."
+        )
+    for index, item in enumerate(out.get("lineItems") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        bad = sorted(k for k in item if k not in _LINE_FIELDS)
+        if bad:
+            raise LexwareError(
+                f"Unbekannte Felder in Position {index}: {', '.join(bad)}. Erlaubt sind: "
+                "type, id (Artikel), name, description, quantity, unitName, unitPrice "
+                "{netAmount|grossAmount, taxRatePercentage}, discountPercentage."
+            )
+
+
 def _block(out: dict[str, Any], key: str) -> dict[str, Any]:
     value = out.get(key)
     return value if isinstance(value, dict) else {}
@@ -296,6 +472,15 @@ def _day_of(value: Any) -> date | None:
         return datetime.fromisoformat(value).date()
     except ValueError:
         return None
+
+
+def _round(value: Any, places: int) -> Any:
+    """Lexware takes at most 4 (prices, quantity) resp. 2 (discount) decimals."""
+    if isinstance(value, float):
+        rounded = float(Decimal(str(value)).quantize(Decimal(1).scaleb(-places),
+                                                     rounding=ROUND_HALF_UP))
+        return int(rounded) if rounded.is_integer() else rounded
+    return value
 
 
 def _price_from_article(article: dict[str, Any], tax_type: str) -> dict[str, Any] | None:
@@ -315,9 +500,14 @@ def _price_from_article(article: dict[str, Any], tax_type: str) -> dict[str, Any
 def _normalize_line(item: dict[str, Any], tax_type: str) -> dict[str, Any]:
     """Aliases and number formats of one line item (no API calls)."""
     item = dict(item)
+    _lower_keys(item, [*_LINE_ALIASES, *_LINE_FIELDS, *_LINE_PRICE_KEYS])
     for alias, target in _LINE_ALIASES.items():
         if alias in item and target not in item:
             item[target] = item.pop(alias)
+    for key in ("articleNumber", "artikelnummer", "article_number", "artikelNr"):
+        if key in item:
+            number = item.pop(key)
+            item.setdefault("id", str(number))  # resolved to the article id later
     price = item.get("unitPrice")
     if not isinstance(price, dict):
         price = {"amount": price} if price is not None else {}
@@ -327,18 +517,18 @@ def _normalize_line(item: dict[str, Any], tax_type: str) -> dict[str, Any]:
     for alias, target in list(_LINE_PRICE_KEYS.items()):
         if alias in price and alias != target:
             price.setdefault(target, price.pop(alias))
-    if "amount" in price:
+    if "amount" in price and tax_type in ("gross", "net", "vatfree"):
         amount = price.pop("amount")
         key = "grossAmount" if tax_type == "gross" else "netAmount"
         price.setdefault(key, amount)
-    for key in ("netAmount", "grossAmount", "taxRatePercentage"):
+    for key in ("netAmount", "grossAmount", "taxRatePercentage", "amount"):
         if key in price:
-            price[key] = to_number(price[key], field=f"unitPrice.{key}")
+            price[key] = _round(to_number(price[key], field=f"unitPrice.{key}"), 4)
     if price:
         item["unitPrice"] = price
-    for key in ("quantity", "discountPercentage"):
+    for key, places in (("quantity", 4), ("discountPercentage", 2)):
         if key in item:
-            item[key] = to_number(item[key], field=key)
+            item[key] = _round(to_number(item[key], field=key), places)
     if item.get("type") is not None:
         word = str(item["type"]).strip().casefold()
         item["type"] = _LINE_TYPES.get(word, item["type"])
@@ -366,7 +556,7 @@ def prepare_document(
     """
     if not isinstance(body, dict):
         return body
-    out = copy.deepcopy(body)
+    out = strip_control(copy.deepcopy(body))
     _apply_aliases(out)
 
     if out.get("voucherDate"):
@@ -400,24 +590,38 @@ def prepare_document(
     raw_items = out.get("lineItems")
     if isinstance(raw_items, dict):
         raw_items = [raw_items]
-    if not isinstance(tax, dict) or not tax.get("taxType"):
-        # only gross prices given → the caller meant gross
+    explicit = str(tax["taxType"]) if isinstance(tax, dict) and tax.get("taxType") else None
+    if isinstance(raw_items, list):
+        raw_items = [
+            _normalize_line(i, explicit or "?") if isinstance(i, dict) else i
+            for i in raw_items
+        ]
+    if explicit is None:
         prices = [
-            i.get("unitPrice") for i in raw_items or []
+            i["unitPrice"] for i in raw_items or []
             if isinstance(i, dict) and isinstance(i.get("unitPrice"), dict)
         ]
-        only_gross = bool(prices) and all(
-            p.get("grossAmount") is not None and p.get("netAmount") is None for p in prices
-        )
-        out["taxConditions"] = {
-            **(tax if isinstance(tax, dict) else {}),
-            "taxType": "gross" if only_gross else "net",
-        }
+        gross_only = [p for p in prices if p.get("grossAmount") is not None
+                      and p.get("netAmount") is None and p.get("amount") is None]
+        others = [p for p in prices if p not in gross_only
+                  and (p.get("netAmount") is not None or p.get("amount") is not None)]
+        if gross_only and others:
+            raise LexwareError(
+                "Gemischte Preisangaben: Einige Positionen haben einen Bruttopreis "
+                "(grossAmount), andere einen Netto- bzw. unklaren Preis. Bitte "
+                "einheitlich angeben – alle netAmount (taxConditions.taxType 'net') "
+                "oder alle grossAmount (taxType 'gross')."
+            )
+        explicit = "gross" if gross_only else "net"
+        out["taxConditions"] = {**(tax if isinstance(tax, dict) else {}), "taxType": explicit}
+        for item in raw_items or []:
+            price = item.get("unitPrice") if isinstance(item, dict) else None
+            if isinstance(price, dict) and "amount" in price:
+                key = "grossAmount" if explicit == "gross" else "netAmount"
+                price.setdefault(key, price.pop("amount"))
     tax_type = str(out["taxConditions"]["taxType"])
     if isinstance(raw_items, list):
-        out["lineItems"] = [
-            _normalize_line(i, tax_type) if isinstance(i, dict) else i for i in raw_items
-        ]
+        out["lineItems"] = raw_items
     if not out.get("lineItems"):
         raise LexwareError(
             "Der Beleg braucht mindestens eine Position (lineItems), z. B. "
@@ -425,6 +629,13 @@ def prepare_document(
             '"unitPrice": {"netAmount": 95, "taxRatePercentage": 19}}].'
         )
     _due_and_delivery(out, kind)
+    _check_fields(out)
+    start, end = _day_of(out.get("voucherDate")), _day_of(out.get("expirationDate"))
+    if start and end and end < start:
+        raise LexwareError(
+            f"Das Angebot wäre nur bis {end:%d.%m.%Y} gültig, also vor dem Belegdatum "
+            f"{start:%d.%m.%Y}. Bitte ein späteres Gültigkeitsdatum angeben."
+        )
     address = out.get("address")
     if isinstance(address, dict) and not address.get("contactId"):
         if address.get("countryCode") or address.get("country"):
@@ -466,6 +677,11 @@ def prepare_document(
         if not isinstance(item, dict):
             continue
         item_type = str(item.get("type") or "")
+        if item.get("id") and client is not None and not _is_uuid(str(item["id"])):
+            item["id"] = _article_id_by_number(client, str(item["id"]), articles)
+            if item.get("type") not in ("material", "service"):
+                item["type"] = "material"
+            item_type = str(item.get("type"))
         if item_type in ("material", "service"):
             article_id = str(item.get("id") or "").strip()
             if not article_id and client is not None and item.get("name"):
@@ -509,6 +725,36 @@ def prepare_document(
     return out
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
+
+
+def _is_uuid(value: str) -> bool:
+    return bool(_UUID_RE.match(value.strip()))
+
+
+def _article_id_by_number(
+    client: LexwareClient, number: str, cache: dict[str, dict[str, Any]]
+) -> str:
+    """Article number (any case) or exact title in a position's `id` → the id."""
+    if "__all__" not in cache:
+        cache["__all__"] = {"items": list(client.paginate("/v1/articles"))}
+    wanted = number.strip().casefold()
+    hits = [a for a in cache["__all__"]["items"]
+            if str(a.get("articleNumber") or "").casefold() == wanted]
+    if not hits:
+        hits = [a for a in cache["__all__"]["items"]
+                if fold(str(a.get("title") or "")) == fold(number)]
+    if len(hits) != 1:
+        raise LexwareError(
+            f"Artikel '{number}' nicht eindeutig gefunden (gesucht als Artikelnummer und "
+            "Bezeichnung). Bitte die Artikel-id aus der Artikelliste verwenden."
+        )
+    cache[hits[0]["id"]] = hits[0]
+    return str(hits[0]["id"])
+
+
 def _article_id_by_name(
     client: LexwareClient, name: str, cache: dict[str, dict[str, Any]]
 ) -> str | None:
@@ -543,6 +789,9 @@ _VOUCHER_KINDS = {
     "creditnote": "salescreditnote", "salescreditnote": "salescreditnote",
     "einkaufsgutschrift": "purchasecreditnote", "lieferantengutschrift": "purchasecreditnote",
     "purchasecreditnote": "purchasecreditnote",
+    "quittung": "purchaseinvoice", "kassenbon": "purchaseinvoice", "bon": "purchaseinvoice",
+    "kassenbeleg": "purchaseinvoice", "receipt": "purchaseinvoice",
+    "tankquittung": "purchaseinvoice", "ausgabebeleg": "purchaseinvoice",
 }
 
 _CENT = Decimal("0.01")
@@ -575,15 +824,39 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(body, dict):
         return body
-    out = copy.deepcopy(body)
+    out = strip_control(copy.deepcopy(body))
     for alias, target in (("date", "voucherDate"), ("datum", "voucherDate"),
                           ("number", "voucherNumber"), ("belegnummer", "voucherNumber"),
                           ("items", "voucherItems"), ("positions", "voucherItems"),
                           ("total", "totalGrossAmount"), ("amount", "totalGrossAmount"),
                           ("contact_id", "contactId"), ("vendorId", "contactId"),
-                          ("customerId", "contactId")):
+                          ("customerId", "contactId"), ("betrag", "totalGrossAmount"),
+                          ("summe", "totalGrossAmount"), ("gesamtbetrag", "totalGrossAmount"),
+                          ("rechnungsdatum", "voucherDate"), ("belegdatum", "voucherDate"),
+                          ("rechnungsnummer", "voucherNumber"), ("nummer", "voucherNumber"),
+                          ("art", "type"), ("belegart", "type"), ("voucherType", "type"),
+                          ("steuerart", "taxType"), ("faelligkeit", "dueDate"),
+                          ("fälligkeit", "dueDate"), ("bemerkung", "remark"),
+                          ("notiz", "remark")):
         if alias in out and target not in out:
             out[target] = out.pop(alias)
+    # supplier/customer as a name → resolved to a contact later (services)
+    for alias in ("lieferant", "supplier", "haendler", "händler", "vendor", "kunde",
+                  "customer", "shop", "geschaeft", "geschäft"):
+        if alias in out and "contactName" not in out and "contactId" not in out:
+            out["contactName"] = out.pop(alias)
+    # a receipt with one amount: build the single item
+    category = (out.pop("kategorie", None) or out.pop("category", None)
+                or out.pop("categoryId", None))
+    rate = (out.pop("taxRatePercent", None) or out.pop("steuersatz", None)
+            or out.pop("taxRate", None))
+    if not out.get("voucherItems") and out.get("totalGrossAmount") is not None and category:
+        out["voucherItems"] = [{
+            "amount": out["totalGrossAmount"],
+            "taxRatePercent": rate if rate is not None else 19,
+            "categoryId": category,
+        }]
+        out.setdefault("taxType", "gross")
     for key in ("voucherDate", "shippingDate", "dueDate"):
         if isinstance(out.get(key), str):
             day = _parse_day(out[key]) or _day_of(document_timestamp(out[key]))
@@ -592,11 +865,29 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
     if out.get("type"):
         word = str(out["type"]).strip().casefold()
         out["type"] = _VOUCHER_KINDS.get(word, out["type"])
+        if out["type"] not in set(_VOUCHER_KINDS.values()):
+            raise LexwareError(
+                f"Unbekannte Belegart '{body.get('type')}'. Möglich: purchaseinvoice "
+                "(Eingangsrechnung, Quittung, Kassenbon), salesinvoice (Ausgangsrechnung), "
+                "salescreditnote (Gutschrift an Kunden), purchasecreditnote "
+                "(Gutschrift vom Lieferanten)."
+            )
+    if not out.get("voucherDate"):
+        out["voucherDate"] = _now().date().isoformat()
     raw_tax = str(out.get("taxType") or "").strip().casefold()
     if raw_tax:
         out["taxType"] = _TAX_TYPES.get(raw_tax, out.get("taxType"))
     else:
-        guessed = _guess_tax_type(out)
+        try:
+            guessed = _guess_tax_type(out)
+        except LexwareError as exc:
+            missing = voucher_missing(out)
+            if missing:  # say everything at once
+                raise LexwareError(
+                    "Für den Buchhaltungsbeleg fehlt: " + "; ".join(missing)
+                    + "; taxType ('gross' = Beträge inkl. Steuer, 'net' = ohne)."
+                ) from exc
+            raise
         if guessed:
             out["taxType"] = guessed
     for key in ("totalGrossAmount", "totalTaxAmount"):
@@ -615,7 +906,7 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
                 item[target] = item.pop(alias)
         for key in ("amount", "taxAmount", "taxRatePercent"):
             if key in item:
-                item[key] = to_number(item[key], field=f"voucherItems.{key}")
+                item[key] = _round(to_number(item[key], field=f"voucherItems.{key}"), 2)
     tax_type = str(out.get("taxType") or "").lower()
     items = out.get("voucherItems")
     if tax_type not in _TAXED_TYPES or not isinstance(items, list) or not items:
@@ -652,6 +943,20 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
     out["totalGrossAmount"] = _money(total_gross)
     out["totalTaxAmount"] = _money(total_tax)
     return out
+
+
+def voucher_missing(body: dict[str, Any]) -> list[str]:
+    """Required bookkeeping-voucher fields that are still missing."""
+    missing: list[str] = []
+    if not body.get("type"):
+        missing.append("type (Eingangsrechnung/purchaseinvoice, Ausgangsrechnung/"
+                       "salesinvoice, Gutschrift …)")
+    if not body.get("voucherNumber"):
+        missing.append("voucherNumber (Belegnummer, z. B. Rechnungs- oder Quittungsnummer)")
+    if not body.get("voucherItems"):
+        missing.append("voucherItems (Positionen mit amount, taxRatePercent, categoryId) "
+                       "– oder einfach totalGrossAmount + kategorie für einen einfachen Beleg")
+    return missing
 
 
 def _guess_tax_type(body: dict[str, Any]) -> str | None:

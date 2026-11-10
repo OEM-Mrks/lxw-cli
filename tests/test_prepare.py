@@ -48,7 +48,10 @@ def test_plain_day_becomes_lexware_timestamp(value: str) -> None:
 def test_timestamp_without_millis_or_offset_is_completed() -> None:
     out = document_timestamp("2026-11-04T10:30:00")
     assert out.startswith("2026-11-04T10:30:00.000")
-    assert document_timestamp("2026-11-04T10:30:00Z") == "2026-11-04T10:30:00.000+00:00"
+    # Day and time as written (Berlin) — a "Z" must not move the date
+    # (Stresstest 10.11.: 23:30Z became the next day).
+    assert document_timestamp("2026-11-04T10:30:00Z").startswith("2026-11-04T10:30:00.000")
+    assert document_timestamp("2026-11-10T23:30:00Z").startswith("2026-11-10T23:30")
 
 
 def test_unparseable_date_is_left_for_lexware() -> None:
@@ -181,6 +184,7 @@ def test_create_quotation_sends_completed_body(client: LexwareClient) -> None:
 def _voucher(tax_type: str, amount: float, rate: float = 19, **extra) -> dict:
     return {
         "type": "purchaseinvoice",
+        "voucherNumber": "R-1",
         "voucherDate": "2026-11-04",
         "taxType": tax_type,
         "voucherItems": [

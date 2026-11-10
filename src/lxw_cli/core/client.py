@@ -44,7 +44,11 @@ _PATH_RE = re.compile(r"^/v1(?:/[A-Za-z0-9_~.-]+)+$")
 def _check_path(path: str) -> None:
     segments = path.split("/")
     if not _PATH_RE.match(path) or any(seg in (".", "..") for seg in segments):
-        raise LexwareError(f"Ungültige Kennung im API-Pfad: {path!r}")
+        ident = path.rsplit("/", 1)[-1] if "/" in path else path
+        raise LexwareError(
+            f"Ungültige Kennung '{ident}': erlaubt sind nur Belegnummern bzw. ids "
+            "(Buchstaben, Ziffern, Bindestrich)."
+        )
 
 
 def _wait_for_retry(retry_state: RetryCallState) -> float:
@@ -362,6 +366,13 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
      "Die Buchungskategorie passt nicht zur Belegart (Einnahmen-Kategorie für "
      "Ausgangsrechnung/Verkaufsgutschrift, Ausgaben-Kategorie für Eingangsrechnung)"),
     (re.compile(r"Feld „([^“]+)“: missing entity", re.I), r"Pflichtangabe „\1“ fehlt"),
+    (re.compile(r"Cannot pursue because quotation contains alternative or optional "
+                r"positions\.?", re.I),
+     "Angebote mit optionalen oder alternativen Positionen lässt Lexware nicht über "
+     "die Schnittstelle weiterführen – bitte in Lexware weiterführen"),
+    (re.compile(r"Alternative line items are only allowed in sub items\.?", re.I),
+     "Alternative Positionen sind über die Schnittstelle nur als Unterpositionen "
+     "erlaubt – bitte als normale Position anlegen"),
     (
         re.compile(r"Feld „(?:company\.)?contactPersons\.size“: invalid value", re.I),
         "Nur ein Ansprechpartner pro Firmenkontakt (Grenze der Lexware-API)",
@@ -369,7 +380,26 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
     (re.compile(r"countrycode is not valid", re.I),
      "Ländercode ungültig – bitte ISO-Code wie DE, AT, CH"),
     (re.compile(r"invalid email", re.I), "ungültige E-Mail-Adresse"),
-    (re.compile(r"invalid taxrate", re.I), "ungültiger Steuersatz (möglich: 0, 7 oder 19 %)"),
+    (re.compile(r"invalid taxrate(?:percentage)?(?: or does not match booking date or "
+                r"country code)?\.?", re.I),
+     "ungültiger Steuersatz (möglich: 0, 7 oder 19 %, passend zu Datum und Land)"),
+    (re.compile(r"Line items in vatfree invoices must not contain taxes\.?", re.I),
+     "Bei steuerfreien Belegen (z. B. innergemeinschaftliche Lieferung) muss der "
+     "Steuersatz jeder Position 0 % sein."),
+    (re.compile(r"The shipping end date must not be before the shipping date\.?", re.I),
+     "Das Ende des Liefer-/Leistungszeitraums liegt vor dem Beginn."),
+    (re.compile(r"^\s*A validation error occurred\.?\s*$", re.I),
+     "Lexware hat die Angaben abgelehnt (Prüffehler ohne Details) – häufig durch "
+     "Steuerzeichen, extrem große Zahlen oder Beträge außerhalb des erlaubten Bereichs."),
+    (re.compile(r"^\s*A referenced entity does not exist\.?\s*$", re.I),
+     "Lexware findet einen verknüpften Datensatz nicht – häufig ein Belegdatum weit "
+     "in der Vergangenheit/Zukunft oder eine falsche Kontakt-/Artikel-id."),
+    (re.compile(r"Invalid data received for field '([^']+)'\.?", re.I),
+     r"Ungültiger Wert bzw. falscher Datentyp für „\1“ (z. B. Text statt Zahl, "
+     r"Liste statt Text)."),
+    (re.compile(r"^Validation failed:\s*\[(.*)\]\s*$", re.S), r"\1"),
+    (re.compile(r"Gültigkeitsdatum darf nicht in der Vergangenheit liegen\.?"),
+     "Das Gültigkeitsdatum darf nicht vor dem Belegdatum bzw. vor heute liegen."),
     (re.compile(r"Ungültiger Umsatzsteuersatz\.", re.I),
      "Ungültiger Umsatzsteuersatz (möglich: 0, 7 oder 19 %)."),
     (re.compile(r"Wähle einen gültigen Steuersatz", re.I),
@@ -386,6 +416,14 @@ _NOT_FOUND_RE = re.compile(
 
 
 def _translate_text(message: str, status: int) -> str:
+    if status >= 500 and re.match(r"^\s*(internal server error|server error|)\s*$",
+                                  message, re.I):
+        return (
+            "Lexware hat einen internen Fehler gemeldet. Das wird meist durch "
+            "ungewöhnliche Eingaben ausgelöst (z. B. Steuerzeichen, extreme Zahlen, "
+            "sehr lange Texte). Bitte die Angaben prüfen; tritt es bei normalen "
+            "Angaben auf, den Lexware-Status prüfen und später erneut versuchen."
+        )
     if status == 404 and _NOT_FOUND_RE.match(message.strip()):
         return (
             "Nicht gefunden – unter dieser id gibt es hier keinen passenden Datensatz "

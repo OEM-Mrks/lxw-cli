@@ -763,7 +763,11 @@ async def test_short_contact_id_is_rejected_before_lexware() -> None:
 
 
 _VOUCHERS = "https://api.lexware.io/v1/vouchers"
-_PURCHASE = {"type": "purchaseinvoice", "voucherNumber": "R-1", "voucherItems": []}
+_PURCHASE = {
+    "type": "purchaseinvoice", "voucherNumber": "R-1", "taxType": "gross",
+    "voucherItems": [{"amount": 119, "taxRatePercent": 19,
+                      "categoryId": "16d04a21-fd91-11e1-a21f-0800200c9a66"}],
+}
 
 
 @respx.mock
