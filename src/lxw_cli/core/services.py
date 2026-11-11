@@ -26,12 +26,16 @@ from lxw_cli.core.errors import LexwareAPIError, LexwareError
 from lxw_cli.core.limits import validate_article, validate_contact, validate_voucher
 from lxw_cli.core.models import ListResult
 from lxw_cli.core.normalize import (
+    CONTACT_KIND_KEYS,
+    bool_word,
+    contact_kind,
     expand_voucher_type_word,
     fold,
     lead_from_given,
     normalize_article,
     normalize_contact,
     normalize_voucher_status,
+    unwrap,
 )
 from lxw_cli.core.prepare import (
     DELIVERY_NOTE,
@@ -109,11 +113,13 @@ def resolve_contact_id(client: LexwareClient, value: str) -> str:
         if len(exact) == 1:
             return exact[0]["id"]
     rows = list_contacts(client, name=text, limit=10).items
-    exact = [r for r in rows if fold(_contact_label(r)) == fold(text)]
+    exact = [r for r in rows if fold(_contact_label(r)) == fold(text) or (
+        r.get("person") and fold(f"{r['person'].get('lastName') or ''} "
+                                 f"{r['person'].get('firstName') or ''}") == fold(text))]
     if len(exact) == 1:
         return exact[0]["id"]
     if exact:
-        rows = exact
+        raise LexwareError(_several_named(text, exact))
     if rows:
         listing = "; ".join(f"{_contact_label(r)} (id {r.get('id')})" for r in rows)
         lead = (f"Die E-Mail '{text}' gehört zu mehreren Kontakten" if "@" in text
@@ -215,7 +221,7 @@ _INVOICING_TYPES = frozenset(
 )
 # Bookkeeping vouchers (/v1/vouchers) — the only ones files can be attached to.
 BOOKKEEPING_TYPES = DEFAULT_VOUCHER_TYPES
-_LOOKUP_STATUSES = f"{DEFAULT_VOUCHER_STATUSES},unchecked"
+_LOOKUP_STATUSES = DEFAULT_VOUCHER_STATUSES  # incl. unchecked
 # How many vouchers with the same number we look at (more never happens in
 # practice; enough to list them all in a hint).
 _MAX_SAME_NUMBER = 10
@@ -234,7 +240,8 @@ def _types_label(voucher_type: str) -> str:
 
 
 _WORD_PREFIX = re.compile(
-    r"^(?:rechnung(?:snummer)?|angebot(?:snummer)?|auftrag(?:sbest[äa]tigung)?|"
+    r"^(?:eingangsrechnung|lieferantenrechnung|ausgangsrechnung|rechnung(?:snummer)?|"
+    r"angebot(?:snummer)?|auftrag(?:sbest[äa]tigung)?|"
     r"lieferschein|gutschrift|rechnungskorrektur|beleg(?:nummer)?|nr\.?|nummer|"
     r"no\.?|invoice|quotation|order)\s*[:#]?\s+",
     re.I,
@@ -242,11 +249,14 @@ _WORD_PREFIX = re.compile(
 
 
 _TYPE_WORD = re.compile(
-    r"^(rechnungskorrektur|auftragsbest[äa]tigung|rechnung|angebot|auftrag|lieferschein|"
+    r"^(eingangsrechnung|lieferantenrechnung|ausgangsrechnung|rechnungskorrektur|"
+    r"auftragsbest[äa]tigung|rechnung|angebot|auftrag|lieferschein|"
     r"gutschrift|invoice|quotation|order)\w*\s*[:#]?\s+", re.I)
 _WORD_TYPES = {
     "rechnung": "invoice,salesinvoice,downpaymentinvoice,purchaseinvoice",
     "invoice": "invoice,salesinvoice,downpaymentinvoice,purchaseinvoice",
+    "ausgangsrechnung": "invoice,salesinvoice,downpaymentinvoice",
+    "eingangsrechnung": "purchaseinvoice", "lieferantenrechnung": "purchaseinvoice",
     "angebot": "quotation", "quotation": "quotation",
     "auftrag": "orderconfirmation", "auftragsbestätigung": "orderconfirmation",
     "auftragsbestaetigung": "orderconfirmation", "order": "orderconfirmation",
@@ -254,7 +264,26 @@ _WORD_TYPES = {
     "gutschrift": "creditnote,salescreditnote,purchasecreditnote",
     "rechnungskorrektur": "creditnote",
 }
+# "ER 4711", "AG 109": the usual abbreviations, tried when nothing else matched.
+_SHORT_WORD = re.compile(r"^(ER|RE|AG|AB|LS|GS|RK)\s*[:#]?\s+(\S.*)$", re.I)
+_SHORT_TYPES = {"er": "eingangsrechnung", "re": "rechnung", "ag": "angebot",
+                "ab": "auftrag", "ls": "lieferschein", "gs": "gutschrift",
+                "rk": "rechnungskorrektur"}
 _INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+
+
+def _exact(rows: list[dict[str, Any]], number: str) -> list[dict[str, Any]]:
+    """Rows whose number IS the number (any case, blanks ignored)."""
+    wanted = re.sub(r"\s+", "", number).casefold()
+    return [r for r in rows if not r.get("voucherNumber")  # nothing to compare
+            or re.sub(r"\s+", "", str(r["voucherNumber"])).casefold() == wanted]
+
+
+def _clean_number_keep_words(value: Any) -> str:
+    import unicodedata
+
+    text = _INVISIBLE.sub("", unicodedata.normalize("NFKC", str(value or "")))
+    return text.strip().strip("'\"„“‚‘`").strip()
 
 
 def _clean_number(value: Any) -> str:
@@ -333,11 +362,12 @@ def _pick(
         listing = "; ".join(_describe_row(r) for r in ranked)
         raise LexwareError(
             f"Mehrere Belege mit der Nummer '{identifier}' ({len(rows)}): {listing}. "
-            "Bitte den gewünschten Beleg über seine id abrufen."
+            "Bitte den gewünschten Beleg über seine id abrufen oder die Belegart dazuschreiben "
+            "(z. B. „Rechnung 1“, „Angebot 1“)."
         )
     others = "; ".join(_describe_row(r) for r in ranked[1:])
     note = (
-        f"Die Nummer '{identifier}' gibt es {len(rows)}-mal. Gezeigt: "
+        f"Die Nummer '{identifier}' gibt es {len(rows)}-mal. Verwendet: "
         f"{_describe_row(best)}. Ebenfalls vorhanden: {others}."
     )
     return best, note
@@ -387,11 +417,22 @@ def find_voucher(
     invoicing document before bookkeeping voucher) and `note` names the others;
     a tie raises with the list of candidates.
     """
-    word = _TYPE_WORD.match(str(identifier or "").strip())
-    if word and not prefer:
-        # the word ("Rechnung 40") decides between same-numbered vouchers; it
-        # does not hide others (a supplier's invoice is a "Rechnung" too)
-        prefer = _WORD_TYPES.get(word.group(1).casefold())
+    original = str(identifier or "").strip()
+    word = _TYPE_WORD.match(_clean_number_keep_words(original))
+    if word:
+        # The word ("Rechnung 40", "Angebot 109") limits the search to its
+        # types — in every tool, also when the caller has its own preference.
+        # "Rechnung" includes supplier invoices (they are invoices too).
+        word_types = _WORD_TYPES.get(word.group(1).casefold(), "")
+        wanted = [t for t in word_types.split(",") if t]
+        if voucher_type not in ("any", ALL_VOUCHER_TYPES):
+            limited = [t for t in voucher_type.split(",") if t in wanted]
+        else:
+            limited = wanted
+        if limited:
+            voucher_type = ",".join(limited)
+            own = [t for t in (prefer or "").split(",") if t in limited]
+            prefer = ",".join(own) if own else ",".join(limited)
     identifier = _clean_number(identifier)
     if not identifier:
         # An empty voucherNumber filter makes Lexware return EVERY voucher —
@@ -402,12 +443,17 @@ def find_voucher(
         )
     if looks_like_uuid(identifier):
         return VoucherMatch(id=identifier)
-    rows = _lookup_number(client, identifier, voucher_type)
+    rows_all = _lookup_number(client, identifier, voucher_type)
+    rows = _exact(rows_all, identifier)
+    # Lexware also answers "4" with "ST2-V-ER-4": such endings only count
+    # when no voucher has the number itself or as a short number (RE0004).
+    loose = [r for r in rows_all if r not in rows]
     used = identifier
     note: str | None = None
     if not rows and re.search(r"\s", identifier):
         compact = re.sub(r"\s+", "", identifier)
-        rows = _lookup_number(client, compact, voucher_type)
+        found_compact = _lookup_number(client, compact, voucher_type)
+        rows = _exact(found_compact, compact)
         if rows:
             used = compact
     sample: list[dict[str, Any]] | None = None
@@ -425,7 +471,7 @@ def find_voucher(
                   .startswith(prefix)]
         found: dict[str, dict[str, Any]] = {}
         for candidate in _number_candidates(split.group(2), shaped):
-            for row in _lookup_number(client, candidate, voucher_type):
+            for row in _exact(_lookup_number(client, candidate, voucher_type), candidate):
                 found.setdefault(str(row.get("id")), row)
         rows = list(found.values())
         if rows:
@@ -442,13 +488,25 @@ def find_voucher(
         )
         found: dict[str, dict[str, Any]] = {}
         for candidate in _number_candidates(identifier, sample):
-            for row in _lookup_number(client, candidate, voucher_type):
+            for row in _exact(_lookup_number(client, candidate, voucher_type), candidate):
                 found.setdefault(str(row.get("id")), row)
         rows = list(found.values())
         if rows:
             numbers = ", ".join(dict.fromkeys(str(r.get("voucherNumber")) for r in rows))
             note = f"Die Nummer '{identifier}' wurde als {numbers} gelesen."
             used = numbers if len(rows) == 1 else identifier
+    short = _SHORT_WORD.match(original)
+    if not rows and short and not word:
+        try:
+            return find_voucher(
+                client, f"{_SHORT_TYPES[short.group(1).casefold()]} {short.group(2)}",
+                voucher_type, prefer=prefer)
+        except LexwareError:
+            pass
+    if not rows and loose:
+        rows = loose
+        numbers = ", ".join(dict.fromkeys(str(r.get("voucherNumber")) for r in rows))
+        note = f"Keine Belegnummer lautet genau '{identifier}'; gefunden: {numbers}."
     if not rows:
         raise LexwareError(_not_found_message(client, identifier, voucher_type, sample))
     best, pick_note = _pick(rows, used, prefer)
@@ -525,7 +583,13 @@ def get_voucher_details(
     types, then of all others (only 404 moves on). A voucher of another type
     than asked for is still returned — with a `hinweis` saying what it is.
     """
-    match = locate_voucher(client, identifier, voucher_type)
+    try:
+        match = locate_voucher(client, identifier, voucher_type)
+    except LexwareError:
+        dunning = _dunning_by_number(client, identifier)
+        if dunning is None:
+            raise
+        return dunning
     allowed = [t.strip() for t in voucher_type.split(",")]
     paths = [p for t, p in _DETAIL_PATHS.items() if t in allowed]
     if match.type in _DETAIL_PATHS:
@@ -548,11 +612,42 @@ def get_voucher_details(
             note = _join(note, "Laut Belegliste ist der Beleg überfällig "
                                f"(fällig seit {str(row.get('dueDate') or '')[:10]}).")
         return _with_note(doc, note)
+    try:
+        # a dunning id (dunnings have no list entry) — only when any type is asked
+        doc = client.get(f"/v1/dunnings/{match.id}") if voucher_type == ALL_VOUCHER_TYPES \
+            else None
+    except LexwareAPIError as exc:
+        if exc.status_code not in (400, 404):
+            raise
+        doc = None
+    if doc is not None:
+        return _with_note(doc, "Das ist eine Mahnung – Rechnungsdaten und Zahlungsstand "
+                               "stehen bei der gemahnten Rechnung.")
     raise LexwareError(
         f"Unter '{identifier.strip()}' gibt es in Lexware keinen Beleg (gesucht als "
         "Rechnung, Abschlagsrechnung, Rechnungskorrektur, Angebot, Auftrag, "
         "Lieferschein und Buchhaltungsbeleg). Bitte Nummer oder id prüfen."
     )
+
+
+_DUNNING_NUMBER = re.compile(r"^(.+?)_(\d{1,2})$")
+
+
+def _dunning_by_number(client: LexwareClient, identifier: str) -> dict[str, Any] | None:
+    """"RE0003_1" is a dunning, not "no voucher" (dunnings are not in the list)."""
+    text = _clean_number(identifier)
+    m = _DUNNING_NUMBER.match(text)
+    if not m:
+        return None
+    try:
+        ref = _dunning_ref(client, text)
+    except LexwareError:
+        return None
+    doc = client.get(f"/v1/dunnings/{ref.id}")
+    out = {**doc, "voucherNumber": doc.get("voucherNumber") or ref.number,
+           "voucherType": "dunning"}
+    return _with_note(out, f"{ref.number} ist eine Mahnung zur Rechnung {ref.invoice} – "
+                           f"Zahlungsstand siehe Rechnung {ref.invoice}.")
 
 
 def _join(*parts: str | None) -> str | None:
@@ -592,25 +687,116 @@ def _with_note(data: Any, note: str | None) -> Any:
     return data
 
 
+_NO_CUSTOMER = ("Bitte einen Kunden angeben (kunde: Name, Kundennummer oder id) – oder eine "
+                "Einmaladresse, z. B. address {\"name\": \"Barverkauf\"}.")
+_EU_COUNTRIES = frozenset(
+    "AT BE BG CY CZ DK EE ES FI FR GR HR HU IE IT LT LU LV MT NL PL PT RO SE SI SK".split())
+# What Lexware needs for the special tax types (its own 406 does not say).
+_TAX_PREREQUISITES = {
+    "intraCommunitySupply": (
+        "Innergemeinschaftliche Lieferung setzt voraus: eigene USt-IdNr. in den "
+        "Lexware-Einstellungen, Beleg an einen Kontakt (kunde/contactId) mit USt-IdNr. und "
+        "einem EU-Land außer DE, Steuersatz 0 % bei allen Positionen und "
+        "Lieferbedingungen (shippingConditions, z. B. Lieferdatum)."),
+    "thirdPartyCountryDelivery": (
+        "Ausfuhr/Drittland-Lieferung setzt voraus: Kunde bzw. Adresse mit einem Land "
+        "außerhalb der EU, Steuersatz 0 % bei allen Positionen und ein Lieferdatum "
+        "(shippingConditions)."),
+    "thirdPartyCountryService": (
+        "Drittland-Leistung setzt voraus: Kunde bzw. Adresse mit einem Land außerhalb der "
+        "EU, Steuersatz 0 % bei allen Positionen und ein Leistungsdatum."),
+    "constructionService13b": (
+        "§13b-Bauleistung setzt voraus: Kunde ist ein Unternehmer (Firmenkontakt, "
+        "kunde/contactId), Steuersatz 0 % bei allen Positionen, Leistungsdatum."),
+    "externalService13b": (
+        "§13b (ausländischer Leistender) betrifft Leistungen eines ausländischen "
+        "Unternehmers; Voraussetzung: Kontakt mit Land außerhalb DE, Steuersatz 0 % bei "
+        "allen Positionen."),
+    "vatfree": (
+        "Steuerfrei setzt voraus: steuerfreie Belege sind für die Firma erlaubt (z. B. "
+        "Kleinunternehmer in den Lexware-Einstellungen), Steuersatz 0 % bei allen Positionen."),
+    "photovoltaicEquipment": (
+        "Photovoltaik (0 %) gilt nur für begünstigte PV-Anlagen; Steuersatz 0 % bei allen "
+        "Positionen, Leistungsdatum."),
+}
+
+
+def _tax_failure(exc: LexwareAPIError, tax_type: str) -> str:
+    """Lexware's reason (translated or verbatim) plus what the tax type needs."""
+    reason = getattr(exc, "message", None) or str(exc)
+    return f"{reason} {_TAX_PREREQUISITES.get(tax_type, '')}".strip()
+
+
+def _contact_number(contact: dict[str, Any]) -> str | None:
+    roles = contact.get("roles") or {}
+    for role, prefix in (("customer", "Kd."), ("vendor", "Lief.")):
+        entry = roles.get(role) if isinstance(roles, dict) else None
+        if isinstance(entry, dict) and entry.get("number"):
+            return f"{prefix} {entry['number']}"
+    return None
+
+
+def _billing(contact: dict[str, Any]) -> dict[str, Any]:
+    entries = (contact.get("addresses") or {}).get("billing") or [{}]
+    return entries[0] if isinstance(entries[0], dict) else {}
+
+
+def _contact_brief(contact: dict[str, Any]) -> str:
+    """"Müller GmbH, Kd. 10052 (Dortmund), id …"."""
+    number, city = _contact_number(contact), _billing(contact).get("city")
+    parts = [_contact_label(contact)]
+    if number:
+        parts.append(number + (f" ({city})" if city else ""))
+    elif city:
+        parts.append(f"({city})")
+    return ", ".join(parts) + f", id {contact.get('id')}"
+
+
+def _exact_contacts(client: LexwareClient, name: str) -> list[dict[str, Any]]:
+    """Contacts whose name is exactly `name` (ä = ae, any case, "Lang, Peter")."""
+    wanted = fold(name)
+    rows: list[dict[str, Any]] = []
+    try:  # Lexware's own search (both spellings) — no full scan for one-offs
+        for variant in [name.strip(), *_spellings(name.strip())]:
+            rows += _list_contacts_raw(
+                client, name=variant, email=None, number=None, customer=False,
+                vendor=False, include_archived=False, limit=10, fetch_all=False,
+            ).items
+    except Exception:  # best effort
+        return []
+    rows = list({str(r.get("id")): r for r in rows}.values())
+    out = []
+    for row in rows:
+        person = row.get("person") or {}
+        reverse = fold(f"{person.get('lastName') or ''} {person.get('firstName') or ''}")
+        if fold(_contact_label(row)) == wanted or (person and reverse == wanted):
+            out.append(row)
+    return out
+
+
 def _prepare_doc(client: LexwareClient, body: dict[str, Any], kind: str) -> dict[str, Any]:
     """prepare_document plus the customer: id, number or name → contactId."""
-    given = body.get("address") if isinstance(body, dict) else None
-    had_country = isinstance(given, dict) and bool(
-        given.get("countryCode") or given.get("country")
-    )
     body = prepare_document(client, body, kind)
-    if isinstance(body, dict) and body.pop("__copy", None):
-        body["__hinweis"] = ("Kopie eines vorhandenen Belegs: Belegdatum auf heute gesetzt "
-                             "(Leistungs-/Lieferdatum bitte prüfen).")
-    address = body.get("address") if isinstance(body, dict) else None
-    if not isinstance(address, dict):
+    if not isinstance(body, dict):
         return body
+    notes = [n for n in (body.pop("__hinweis", None),) if n]
+    is_copy = bool(body.pop("__copy", None))
+    if is_copy:
+        notes.insert(0, "Kopie eines vorhandenen Belegs: Belegdatum auf heute gesetzt "
+                        "(Leistungs-/Lieferdatum bitte prüfen).")
+    address = body.get("address")
+    if not isinstance(address, dict) or not any(
+            v for k, v in address.items() if k != "countryCode"):
+        raise LexwareError(_NO_CUSTOMER)
+    full_one_off = not address.get("contactId") and bool(
+        set(address) - {"name", "countryCode", "contactPerson"})
     contact = str(address.get("contactId") or "").strip()
     if contact and not looks_like_uuid(contact):
         try:
             address["contactId"] = resolve_contact_id(client, contact)
         except LexwareError as exc:
-            if "Ähnlich" in str(exc) or re.fullmatch(r"[A-Za-z]{0,3}[-\s]?\d+", contact):
+            if ("Ähnlich" in str(exc) or "Mehrere Kontakte" in str(exc)
+                    or re.fullmatch(r"[A-Za-z]{0,3}[-\s]?\d+", contact)):
                 raise  # similar customers exist / a number: never guess a one-off
             near = _near_contacts(client, contact)
             if near:
@@ -620,34 +806,136 @@ def _prepare_doc(client: LexwareClient, body: dict[str, Any], kind: str) -> dict
                     + "? Für einen neuen Kunden ohne Stammdaten address {name, …} angeben."
                 ) from exc
             # nobody by that name: a one-off customer, as the caller wrote it
-            body["address"] = {"name": contact, "countryCode": "DE"}
-            body["__hinweis"] = (
+            rest = {k: v for k, v in address.items() if k != "contactId"}
+            body["address"] = {"name": contact, "countryCode": "DE", **rest}
+            notes.append(
                 f"'{contact}' gibt es nicht im Kundenstamm – der Beleg geht an eine "
                 "einmalige Adresse ohne Anschrift. Für einen Stammkunden erst den "
                 "Kontakt anlegen; für eine Anschrift address {name, street, zip, city}."
             )
-    elif not contact and address.get("name") and set(address) <= {
-        "name", "countryCode", "contactPerson"
-    }:
+    elif not contact and address.get("name") and not full_one_off:
         # only a bare name is a reference; a full address is a deliberate
         # one-off address (e.g. same company, other site)
-        hit = _unique_contact_by_name(client, str(address["name"]))
-        if hit:
+        same = _exact_contacts(client, str(address["name"]))
+        if len(same) > 1:
+            raise LexwareError(_several_named(str(address["name"]), same))
+        if same:
             # Only the id: with a name next to it Lexware treats the address as
             # a full custom one and demands countryCode etc. (seen live).
-            keep = {"contactPerson"} | ({"countryCode"} if had_country else set())
+            keep = {"contactPerson"}
             body["address"] = {
-                "contactId": hit,
+                "contactId": same[0]["id"],
                 **{k: v for k, v in address.items() if k in keep},
             }
+    address = body["address"]
+    if looks_like_uuid(str(address.get("contactId") or "")):
+        # a copy carries the name printed back then — the contact may be renamed
+        _complete_contact_address(client, body, notes, check_name=not is_copy)
+    elif full_one_off and address.get("name"):
+        same = _exact_contacts(client, str(address["name"]))
+        if same:
+            notes.append(
+                f"'{address['name']}' gibt es als Kontakt ({_contact_brief(same[0])}) – der "
+                "Beleg ist nicht mit ihm verknüpft (Einmaladresse). Für die Verknüpfung "
+                "kunde bzw. contactId angeben."
+            )
+    if notes:
+        body["__hinweis"] = " ".join(notes)
     return body
+
+
+def _several_named(name: str, rows: list[dict[str, Any]]) -> str:
+    return (f"Mehrere Kontakte heißen genau '{name}': "
+            + "; ".join(_contact_brief(r) for r in rows)
+            + " – bitte die Kundennummer (oder id) angeben.")
+
+
+# Legal forms at the end of a company name ("Coal Control GmbH & Co. KG").
+_LEGAL_FORM_RE = re.compile(
+    r"(?:[\s,]+(?:gmbh\s*(?:&|und)\s*co\.?\s*kg(?:aa)?|gmbh|ggmbh|mbh|ag|kgaa|kg|ohg|"
+    r"ug(?:\s*\(haftungsbeschr(?:ä|ae)nkt\))?|e\.\s?k\.?|e\.\s?kfm\.?|e\.\s?kfr\.?|gbr|"
+    r"partg(?:\s?mbb)?|se|ltd\.?|limited|inc\.?|llc|plc|corp\.?|e\.\s?v\.?|ev|bv|nv|"
+    r"s\.?a\.?r\.?l\.?|sas|s\.?a\.?|co\.?\s*kg|&\s*co\.?))+\s*$", re.I)
+
+
+def _same_name(given: str, label: str) -> bool:
+    """The given name IS the contact's — exactly or without its legal form
+    ("Coal Control" for "Coal Control GmbH & Co. KG"); a part ("Müller", "Bau",
+    "GmbH" for "Müller Bau GmbH") is not."""
+    want = _loose(given)
+    if want == _loose(label):
+        return True
+    short = _loose(_LEGAL_FORM_RE.sub("", label.strip()))
+    plain = _loose(_LEGAL_FORM_RE.sub("", given.strip()))
+    given_form = _LEGAL_FORM_RE.search(given.strip())
+    if given_form:
+        # "Müller AG" is not "Müller GmbH": a stated legal form must match.
+        label_form = _LEGAL_FORM_RE.search(label.strip())
+        if not label_form or _loose(given_form.group(0)) != _loose(label_form.group(0)):
+            return False
+    return bool(short) and bool(plain) and plain == short
+
+
+def _complete_contact_address(
+    client: LexwareClient, body: dict[str, Any], notes: list[str], *, check_name: bool = True
+) -> None:
+    """contactId plus some address fields: the missing ones come from the
+    contact (Lexware would print the partial address otherwise); a different
+    name raises. Also: EU customer with VAT id but 19 % → hint."""
+    address = body["address"]
+    extra = set(address) - {"contactId", "contactPerson", "countryCode"}
+    tax = str((body.get("taxConditions") or {}).get("taxType") or "")
+    taxed = tax in ("net", "gross") and any(
+        isinstance(i, dict) and isinstance(i.get("unitPrice"), dict)
+        and (i["unitPrice"].get("taxRatePercentage") or 0) > 0
+        for i in body.get("lineItems") or [])
+    if not extra and not taxed:
+        return
+    try:
+        contact = client.get(f"/v1/contacts/{address['contactId']}")
+    except Exception:  # best effort — Lexware names a wrong id itself
+        return
+    if not isinstance(contact, dict):
+        return
+    label = _contact_label(contact)
+    name = address.get("name")
+    if check_name and name and _same_name(str(name), label):
+        address["name"] = label  # the full name, also for "Coal Control"
+    elif check_name and name:
+        raise LexwareError(
+            f"Der Name '{name}' passt nicht zum Kontakt {_contact_brief(contact)}. Soll der "
+            "Beleg an diesen Kontakt gehen (dann den Namen weglassen) oder an eine "
+            "Einmaladresse (dann ohne contactId, mit voller Anschrift)?"
+        )
+    billing = _billing(contact)
+    if extra:
+        for key, value in (("name", label), ("supplement", billing.get("supplement")),
+                           ("street", billing.get("street")), ("zip", billing.get("zip")),
+                           ("city", billing.get("city")),
+                           ("countryCode", billing.get("countryCode"))):
+            if value and not address.get(key):
+                address[key] = value
+    company = contact.get("company") or {}
+    country = billing.get("countryCode")
+    if taxed and company.get("vatRegistrationId") and country in _EU_COUNTRIES:
+        notes.append(
+            f"{label} sitzt in {country} und hat eine USt-IdNr. – ggf. innergemeinschaftliche "
+            "Lieferung (Steuerart intraCommunitySupply, 0 %) statt deutscher Umsatzsteuer?"
+        )
 
 
 def _post_doc(client: LexwareClient, path: str, body: dict[str, Any]) -> Any:
     """Validate, POST, and pass on a note from the preparation (``hinweis``)."""
     note = body.pop("__hinweis", None) if isinstance(body, dict) else None
     validate_voucher(body)
-    created = client.post(path, body)
+    try:
+        created = client.post(path, body)
+    except LexwareAPIError as exc:
+        tax = str(((body.get("taxConditions") or {}) if isinstance(body, dict) else {})
+                  .get("taxType") or "")
+        if exc.status_code in (400, 406) and tax in _TAX_PREREQUISITES:
+            raise LexwareError(_tax_failure(exc, tax)) from exc
+        raise
     if isinstance(created, dict) and created.get("id"):
         try:
             doc = client.get(f"{path}/{created['id']}")
@@ -658,6 +946,13 @@ def _post_doc(client: LexwareClient, path: str, body: dict[str, Any]) -> Any:
                 "totalNetAmount": total.get("totalNetAmount"),
                 "totalGrossAmount": total.get("totalGrossAmount"),
             }.items() if v is not None}}
+            wanted = (body.get("address") or {}).get("contactPerson")
+            got = (doc.get("address") or {}).get("contactPerson")
+            if wanted and got and fold(str(got)) != fold(str(wanted)):
+                note = _join(note, (
+                    f"Lexware hat als Ansprechpartner „{got}“ eingetragen (der "
+                    f"Ansprechpartner des Kontakts) statt „{wanted}“ – ein anderer "
+                    "Ansprechpartner geht nur über eine Einmaladresse oder in Lexware."))
         except Exception:  # best effort — the document exists
             pass
     if note and isinstance(created, dict):
@@ -1011,19 +1306,59 @@ def _query_voucherlist(
 
 
 def _date_filters(date_from: str | None, date_to: str | None) -> dict[str, str]:
-    """Belegdatum von/bis ("01.10.2026", "2026-10-01", "heute") → voucherlist params."""
+    """Belegdatum von/bis ("01.10.2026", "2026-10-01", "heute", "November 2026",
+    "2026-11", "Oktober") → voucherlist params; a month means its first resp.
+    last day."""
     from lxw_cli.core.prepare import document_timestamp
 
     out: dict[str, str] = {}
-    for key, value in (("voucherDateFrom", date_from), ("voucherDateTo", date_to)):
-        if value and str(value).strip():
-            stamp = str(document_timestamp(str(value)))
-            if not re.match(r"^\d{4}-\d{2}-\d{2}", stamp):
-                raise LexwareError(
-                    f"Datum '{value}' nicht lesbar – bitte TT.MM.JJJJ oder JJJJ-MM-TT."
-                )
-            out[key] = stamp[:10]
+    for key, value, first in (("voucherDateFrom", date_from, True),
+                              ("voucherDateTo", date_to, False)):
+        if not value or not str(value).strip():
+            continue
+        month = _month_range(str(value))
+        if month:
+            out[key] = (month[0] if first else month[1]).isoformat()
+            continue
+        stamp = str(document_timestamp(str(value)))
+        if not re.match(r"^\d{4}-\d{2}-\d{2}", stamp):
+            raise LexwareError(
+                f"Datum '{value}' nicht lesbar – bitte TT.MM.JJJJ, JJJJ-MM-TT oder einen "
+                "Monat wie „November 2026“."
+            )
+        out[key] = stamp[:10]
+    if out.get("voucherDateFrom") and out.get("voucherDateTo") and (
+            out["voucherDateFrom"] > out["voucherDateTo"]):
+        raise LexwareError(
+            f"Der Zeitraum ist verdreht: date_from ({out['voucherDateFrom']}) liegt nach "
+            f"date_to ({out['voucherDateTo']}) – bitte die Daten tauschen."
+        )
     return out
+
+
+def _month_range(value: str) -> tuple[Any, Any] | None:
+    """"November 2026", "Nov. 2026", "2026-11", "11/2026", "Oktober" → (1st, last)."""
+    from datetime import date
+
+    from lxw_cli.core.prepare import _MONTHS, _now, month_end
+
+    text = value.strip().casefold().replace(".", " ").replace(",", " ")
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})", text) or None
+    year = month = None
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+    elif (m := re.fullmatch(r"(\d{1,2})\s*[/ ]\s*(\d{4})", text)):
+        month, year = int(m.group(1)), int(m.group(2))
+    else:
+        parts = text.split()
+        if len(parts) in (1, 2) and parts[0] in _MONTHS and (
+                len(parts) == 1 or re.fullmatch(r"\d{4}", parts[1])):
+            month = _MONTHS[parts[0]]
+            year = int(parts[1]) if len(parts) == 2 else _now().year
+    if not year or not month or not 1 <= month <= 12:
+        return None
+    first = date(year, month, 1)
+    return first, month_end(first)
 
 
 def split_voucher_status(status: str) -> list[str]:
@@ -1109,10 +1444,11 @@ def download_pdf(
         match.type and voucher_type != ALL_VOUCHER_TYPES
         and match.type not in voucher_type.split(",")
     ):
+        tool = _PDF_TOOLS.get(match.type or "", "download_voucher_file")
         raise LexwareError(
             f"{number} ist {_kind_phrase(match.type)}, "
             f"kein Beleg der gesuchten Art ({_types_label(voucher_type)}). Für dieses "
-            "PDF bitte das passende Werkzeug nehmen bzw. „Datei herunterladen“."
+            f"PDF bitte {tool} verwenden."
         )
     kinds = [match.type] if match.type else [
         t.strip() for t in f"{voucher_type},{ALL_VOUCHER_TYPES}".split(",")
@@ -1133,12 +1469,32 @@ def download_pdf(
     ) from last
 
 
+_PDF_TOOLS = {
+    "invoice": "download_invoice_pdf", "salesinvoice": "download_invoice_pdf",
+    "downpaymentinvoice": "download_invoice_pdf", "creditnote": "download_invoice_pdf",
+    "quotation": "download_quotation_pdf",
+    "orderconfirmation": "download_order_confirmation_pdf",
+    "deliverynote": "download_delivery_note_pdf",
+}
+
+
 def _refuse_silent_pick(match: VoucherMatch) -> None:
     """A file can't carry a hint — with several candidates, ask instead."""
     if match.ambiguous:
         raise LexwareError(
-            f"{match.note} Für die Datei bitte den gewünschten Beleg über seine id angeben."
+            f"{_candidates_text(match)} Für die Datei bitte den gewünschten Beleg über seine "
+            "id oder die volle Nummer angeben."
         )
+
+
+def _candidates_text(match: VoucherMatch) -> str:
+    """The candidates of an ambiguous number — for a message that shows none."""
+    rows = match.rows or ([match.row] if match.row else [])
+    number = (match.row or {}).get("voucherNumber") or ""
+    numbers = {str(r.get("voucherNumber")) for r in rows}
+    lead = (f"Die Nummer '{number}' gibt es {len(rows)}-mal" if len(numbers) == 1
+            else f"Mehrere Belege passen ({len(rows)})")
+    return f"{lead}: " + "; ".join(_describe_row(r) for r in rows) + "."
 
 
 def safe_stem(value: str) -> str:
@@ -1293,10 +1649,13 @@ def _bookkeeping_id(client: LexwareClient, identifier: str) -> str:
     match = find_voucher(client, identifier, ALL_VOUCHER_TYPES, prefer=BOOKKEEPING_TYPES)
     if match.type in _INVOICING_TYPES:
         number = (match.row or {}).get("voucherNumber") or identifier.strip()
+        draft = (match.row or {}).get("voucherStatus") == "draft"
         raise LexwareError(
             f"{number} ist ein Beleg aus dem Rechnungsteil ({_type_label(match.type)}). "
             "Dateien lassen sich nur an Buchhaltungsbelege (z. B. Eingangsrechnungen, "
-            "Quittungen) anhängen; dieser Beleg hat sein PDF bereits."
+            "Quittungen) anhängen; "
+            + ("der Entwurf bekommt sein PDF, wenn er in Lexware abgeschlossen wird."
+               if draft else "dieser Beleg hat sein PDF bereits.")
         )
     return match.id
 
@@ -1331,13 +1690,33 @@ def _require_voucher_fields(body: dict[str, Any]) -> None:
         raise LexwareError("Für den Buchhaltungsbeleg fehlt: " + "; ".join(missing) + ".")
 
 
-def _resolve_categories(client: LexwareClient, body: dict[str, Any]) -> None:
-    """categoryId per item: id, or category name → id; wrong kind → German error."""
+def _category_word(value: str) -> str:
+    """Everyday word → Lexware category name ("Tank" → Kraftstoff/Ladestrom)."""
+    key = fold(value)
+    if key in _CATEGORY_WORDS:
+        return _CATEGORY_WORDS[key]
+    if len(key) >= 4:
+        for word, name in _CATEGORY_WORDS.items():
+            if word.startswith(key) or key.startswith(word):
+                return name
+    return value
+
+
+def _resolve_categories(
+    client: LexwareClient, body: dict[str, Any], *, generic_credit: bool = False
+) -> list[str]:
+    """categoryId per item: id, or category name → id; wrong kind → German error.
+
+    Returns the category names used (for the result). A plain "Gutschrift"
+    becomes a supplier's credit note when the category is an expense one.
+    """
     items = body.get("voucherItems")
     if not isinstance(items, list) or not items:
-        return
+        return []
     kind = str(body.get("type") or "")
     wanted_type = "income" if kind in _INCOME_KINDS else "outgo" if kind else None
+    if generic_credit:
+        wanted_type = None
     for item in items:
         if isinstance(item, dict) and not str(item.get("categoryId") or "").strip():
             raise LexwareError(
@@ -1348,21 +1727,22 @@ def _resolve_categories(client: LexwareClient, body: dict[str, Any]) -> None:
     needs_lookup = any(
         isinstance(i, dict) and not looks_like_uuid(str(i.get("categoryId") or ""))
         for i in items
-    )
+    ) or generic_credit
     if not needs_lookup:
-        return  # a wrong kind is translated from Lexware's answer
+        return []  # a wrong kind is translated from Lexware's answer
     try:
         categories = list_posting_categories(client)
     except Exception:  # best effort — Lexware will name the problem itself
-        return
+        return []
     by_id = {str(c.get("id")): c for c in categories}
+    used: list[str] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         value = str(item.get("categoryId") or "").strip()
         if not looks_like_uuid(value) and not any(
                 fold(str(c.get("name") or "")) == fold(value) for c in categories):
-            value = _CATEGORY_WORDS.get(fold(value), value)
+            value = _category_word(value)
         if not looks_like_uuid(value):
             hits = [
                 c for c in categories
@@ -1381,6 +1761,16 @@ def _resolve_categories(client: LexwareClient, body: dict[str, Any]) -> None:
                         f"„{other[0].get('name')}“ ist keine {kind_word}-Kategorie und passt "
                         f"nicht zur Belegart {_type_label(kind)}. Bitte eine "
                         f"{kind_word}-Kategorie wählen (Liste der Buchungskategorien)."
+                    )
+            if not hits:
+                group = [c for c in categories if fold(str(c.get("groupName") or ""))
+                         == fold(value) and (wanted_type is None
+                                             or str(c.get("type")) == wanted_type)]
+                if group:
+                    names = ", ".join(str(c.get("name")) for c in group[:12])
+                    raise LexwareError(
+                        f"„{value}“ ist eine Gruppe von Buchungskategorien – bitte eine daraus "
+                        f"wählen: {names}."
                     )
             if len(hits) != 1:
                 if not hits:
@@ -1401,8 +1791,13 @@ def _resolve_categories(client: LexwareClient, body: dict[str, Any]) -> None:
                     + " Der Name darf auch so angegeben werden."
                 )
             item["categoryId"] = hits[0]["id"]
+            used.append(str(hits[0].get("name")))
+            _credit_side(body, hits[0], generic_credit)
             continue
         category = by_id.get(value)
+        if category:
+            used.append(str(category.get("name")))
+            _credit_side(body, category, generic_credit)
         if category and wanted_type and str(category.get("type")) != wanted_type:
             raise LexwareError(
                 f"Die Kategorie „{category.get('name')}“ ist eine "
@@ -1410,6 +1805,14 @@ def _resolve_categories(client: LexwareClient, body: dict[str, Any]) -> None:
                 f"Kategorie, der Beleg ist aber eine {_type_label(kind)}. Bitte eine "
                 f"{'Einnahmen' if wanted_type == 'income' else 'Ausgaben'}-Kategorie wählen."
             )
+    return used
+
+
+def _credit_side(body: dict[str, Any], category: dict[str, Any], generic: bool) -> None:
+    """"Gutschrift" with an expense category is one FROM a supplier."""
+    if generic:
+        body["type"] = ("purchasecreditnote" if str(category.get("type")) == "outgo"
+                        else "salescreditnote")
 
 
 def _existing_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any] | None:
@@ -1486,7 +1889,10 @@ _NO_SHIPPING_DATE = "expected_no_shipping_date_for_given_voucher_type"
 
 def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
     body = prepare_voucher(body)
+    categories: list[str] = []
     if isinstance(body, dict):
+        generic_credit = bool(body.pop("__generic_credit", False))
+        receipt = bool(body.pop("__receipt", False))
         _require_voucher_fields(body)
         if body.get("contactId") and not looks_like_uuid(str(body["contactId"])):
             body["contactId"] = resolve_contact_id(client, str(body["contactId"]))
@@ -1496,9 +1902,22 @@ def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any
             if hit:
                 body["contactId"] = hit
                 body.pop("contactName")
+            else:
+                similar = _similar_contacts(client, str(body["contactName"]))
+                if similar:
+                    body["__hinweis"] = _join(body.get("__hinweis"), (
+                        f"Gebucht auf den Sammelkontakt mit dem Namen „{body['contactName']}“. "
+                        f"Ähnliche Kontakte: {'; '.join(similar)} – für die Zuordnung "
+                        "contactId bzw. den genauen Namen angeben."))
         if not body.get("contactId") and "useCollectiveContact" not in body:
             body["useCollectiveContact"] = True
-        _resolve_categories(client, body)
+        categories = _resolve_categories(client, body, generic_credit=generic_credit)
+        due, day = str(body.get("dueDate") or "")[:10], str(body.get("voucherDate") or "")[:10]
+        if body.get("type") == "purchaseinvoice" and (receipt or (due and due == day)):
+            body["__hinweis"] = _join(body.get("__hinweis"), (
+                "Lexware führt den Beleg als offen (ab Fälligkeit als überfällig), bis eine "
+                "Zahlung zugeordnet ist – eine Barzahlung lässt sich über die Schnittstelle "
+                "nicht erfassen (in Lexware „als bezahlt markieren“ oder per Bankabgleich)."))
         existing = _existing_voucher(client, body)
         earlier = None if existing is not None else _same_number_other_date(client, body)
         if earlier:
@@ -1516,7 +1935,6 @@ def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any
     validate_voucher(body)
     try:
         created = client.post("/v1/vouchers", body)
-        return {**created, "hinweis": note} if note and isinstance(created, dict) else created
     except LexwareAPIError as exc:
         if not (isinstance(body, dict) and body.get("shippingDate")):
             raise
@@ -1524,7 +1942,28 @@ def create_voucher(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any
             raise
         retry = {k: v for k, v in body.items() if k != "shippingDate"}
         created = client.post("/v1/vouchers", retry)
-        return {**created, "hinweis": note} if note and isinstance(created, dict) else created
+    if isinstance(created, dict):
+        if categories:
+            created = {**created, "kategorie": ", ".join(dict.fromkeys(categories))}
+        if note:
+            created = {**created, "hinweis": note}
+    return created
+
+
+def _similar_contacts(client: LexwareClient, name: str) -> list[str]:
+    """Contacts whose name contains the given one (for a hint, never linked)."""
+    try:
+        rows = list_contacts(client, name=name, limit=5).items
+    except Exception:  # best effort
+        return []
+    wanted = fold(name)
+    out = []
+    for row in rows:
+        label = _contact_label(row)
+        if wanted and wanted in fold(label) and fold(label) != wanted:
+            number = _contact_number(row)
+            out.append(f"{label}" + (f" ({number})" if number else ""))
+    return out
 
 
 # -- Beleg-Anhänge (voucher file attachments) -------------------------------
@@ -1737,9 +2176,15 @@ def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]
             except LexwareError as exc:
                 results.append({"beleg": part, "fehler": str(exc)})
         return {"belege": results}
-    match = find_voucher(
-        client, identifier, ALL_VOUCHER_TYPES, prefer=f"{PAYMENT_TYPES},creditnote"
-    )
+    try:
+        match = find_voucher(
+            client, identifier, ALL_VOUCHER_TYPES, prefer=f"{PAYMENT_TYPES},creditnote"
+        )
+    except LexwareError:
+        dunning = _dunning_payment(client, identifier)
+        if dunning is None:
+            raise
+        return dunning
     if match.type in _NO_PAYMENT_TYPES:
         plural = {"quotation": "Angebote", "orderconfirmation": "Auftragsbestätigungen",
                   "deliverynote": "Lieferscheine"}[match.type]
@@ -1756,6 +2201,10 @@ def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]
     try:
         data = client.get(f"/v1/payments/{match.id}")
     except LexwareAPIError as exc:
+        if exc.status_code == 404 and match.type is None:
+            dunning = _dunning_payment(client, match.id)
+            if dunning is not None:
+                return dunning
         if exc.status_code == 406 and "draft state" in str(exc):
             row = match.row or {}
             return _with_note({
@@ -1763,7 +2212,9 @@ def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]
                 "voucherType": match.type,
                 "voucherStatus": "draft",
                 "paymentStatus": "draft",
-                "openAmount": row.get("totalAmount"),
+                # a draft owes nothing yet — same as for Rechnungskorrekturen
+                "openAmount": None,
+                "totalAmount": row.get("totalAmount"),
                 "currency": row.get("currency") or "EUR",
                 "paymentItems": [],
                 "hinweis": "Der Beleg ist noch ein Entwurf – Zahlungen gibt es erst, "
@@ -1778,7 +2229,57 @@ def get_payment_status(client: LexwareClient, identifier: str) -> dict[str, Any]
             f"Für diesen Beleg ({_type_label(found.group(1).lower())}) führt Lexware "
             "keinen Zahlungsstatus."
         ) from exc
-    return _with_note(data, match.note)
+    return _with_note(data, _join(match.note, _balanced_by_credit(client, match, data)))
+
+
+def _balanced_by_credit(client: LexwareClient, match: VoucherMatch, data: Any) -> str | None:
+    """An invoice offset by a Rechnungskorrektur: name it."""
+    if not isinstance(data, dict) or match.type not in ("invoice", None):
+        return None
+    state = str(data.get("paymentStatus") or "").lower()
+    status = str(data.get("voucherStatus") or (match.row or {}).get("voucherStatus") or "")
+    if state != "balanced" and status != "paidoff":
+        return None
+    try:
+        invoice = client.get(f"/v1/invoices/{match.id}")
+    except Exception:  # best effort
+        return None
+    credits = [str(r.get("voucherNumber") or r.get("id")) for r in invoice.get(
+        "relatedVouchers") or [] if isinstance(r, dict)
+        and str(r.get("voucherType")).lower() == "creditnote"]
+    if not credits:
+        return None
+    return f"Ausgeglichen durch Rechnungskorrektur {', '.join(credits)}."
+
+
+def _dunning_payment(client: LexwareClient, identifier: str) -> dict[str, Any] | None:
+    """A dunning has no payment status of its own — point to the invoice."""
+    text = _clean_number(identifier)
+    if looks_like_uuid(text):
+        try:
+            doc = client.get(f"/v1/dunnings/{text}")
+        except Exception:  # not a dunning either
+            return None
+        number = doc.get("voucherNumber") or _dunning_number_of(client, doc, text)
+        invoice = str(number or "").rsplit("_", 1)[0] or None
+    else:
+        if not _DUNNING_NUMBER.match(text):
+            return None
+        try:
+            ref = _dunning_ref(client, text)
+        except LexwareError:
+            return None
+        number, invoice = ref.number, ref.invoice
+    return {
+        "voucherType": "dunning",
+        "voucherNumber": number,
+        "paymentStatus": None,
+        "openAmount": None,
+        "invoice": invoice,
+        "hinweis": f"{number or 'Das'} ist eine Mahnung – Mahnungen haben keinen eigenen "
+                   "Zahlungsstand. Zahlungsstand siehe Rechnung "
+                   f"{invoice or '(gemahnte Rechnung)'}.",
+    }
 
 
 def _credit_note_payment_status(
@@ -1793,6 +2294,8 @@ def _credit_note_payment_status(
     open_amount = row.get("openAmount")
     if open_amount is None and status in ("paidoff", "paid", "voided"):
         open_amount = 0
+    if status == "draft":
+        open_amount = None
     related = [
         {k: v for k, v in r.items() if k in ("id", "voucherNumber", "voucherType")}
         for r in doc.get("relatedVouchers") or []
@@ -1856,10 +2359,10 @@ def list_posting_categories(
             )
         items = [c for c in items if str(c.get("type", "")).casefold() == wanted]
     if search and search.strip():
-        needle = fold(search)
+        needles = {fold(search), fold(_category_word(search))} - {""}
         items = [
             c for c in items
-            if needle in fold(f"{c.get('name', '')} {c.get('groupName', '')}")
+            if any(n in fold(f"{c.get('name', '')} {c.get('groupName', '')}") for n in needles)
         ]
     return items
 
@@ -2093,8 +2596,21 @@ _DOC_META: dict[str, dict[str, str]] = {
 def _kind_phrase(doc_type: str | None) -> str:
     """"eine Rechnung", "ein Angebot", else "ein Beleg der Art …"."""
     if doc_type in _DOC_META:
-        return _with_article(doc_type).lower()
+        meta = _DOC_META[doc_type]
+        return f"{meta['art']} {meta['label']}"
+    if doc_type in ("salesinvoice", "salescreditnote", "purchaseinvoice",
+                    "purchasecreditnote", "downpaymentinvoice"):
+        return f"eine {_type_label(doc_type)}"
     return f"ein Beleg der Art {_type_label(doc_type)}"
+
+
+_DEFINITE = {"quotation": "Das Angebot", "orderconfirmation": "Der Auftrag",
+             "deliverynote": "Der Lieferschein", "invoice": "Die Rechnung",
+             "creditnote": "Die Rechnungskorrektur", "dunning": "Die Mahnung"}
+
+
+def _definite(doc_type: str | None) -> str:
+    return _DEFINITE.get(doc_type or "", "Der Beleg")
 
 
 def _with_article(doc_type: str) -> str:
@@ -2248,6 +2764,7 @@ def continue_document(
             f"Unbekanntes Ziel '{target}'. Möglich sind: Auftrag, Lieferschein, "
             "Rechnung, Rechnungskorrektur oder Mahnung."
         )
+    changes = _canonical_changes(changes)
 
     source_type, source_id, source = _resolve_source(client, identifier, target_type)
     _check_source_state(source, source_type, target_type, identifier)
@@ -2261,27 +2778,55 @@ def continue_document(
             f"möglich: {options}."
         )
     _check_optional_positions(source, source_type)
-    existing = _existing_followups(source, target_type)
+    _check_unfit_changes(changes, target_type)
+    number = source.get("voucherNumber") or identifier.strip()
+    notes: list[str] = []
     partial_credit = target_type == "creditnote" and bool((changes or {}).get("lineItems"))
-    blocking = [] if target_type == "dunning" or partial_credit or allow_duplicate else (
-        _real_followups(client, source, target_type)
-    )
-    if blocking:
-        existing = blocking
-        number = source.get("voucherNumber") or identifier.strip()
-        raise LexwareError(
-            f"Zu {number} gibt es schon einen Folgebeleg: {_DOC_META[target_type]['label']} "
-            f"{', '.join(existing)}. Ein weiterer "
-            "Folgebeleg wurde NICHT angelegt (Gefahr doppelter Rechnung/Lieferung). "
-            "Für eine Teil-Lieferung/-Rechnung oder wenn es ausdrücklich gewünscht ist, "
-            "mit allow_duplicate=true erneut aufrufen."
-        )
+    is_dunning = target_type == "dunning"
+    level = 0
+    credits: list[dict[str, Any]] = []
+    if is_dunning:
+        dunnings = _dunning_states(client, source)
+        drafts = [n for n, state in dunnings if state == "draft"]
+        if drafts and not allow_duplicate:
+            raise LexwareError(
+                f"Zur Rechnung {number} gibt es schon einen Mahnungs-Entwurf "
+                f"({', '.join(drafts)}). Es wurde keine weitere Mahnung angelegt – bitte den "
+                "Entwurf in Lexware abschließen oder löschen. Für eine weitere Mahnung "
+                f"trotzdem: continue_document({number}, \"Mahnung\", allow_duplicate=true)."
+            )
+        level = sum(1 for _, state in dunnings if state not in ("draft", "voided")) + 1
+    elif target_type == "creditnote":
+        credits = _real_followups(client, source, "creditnote", details=True)
+        if credits and not partial_credit and not allow_duplicate:
+            raise LexwareError(
+                f"Zu {number} gibt es schon Rechnungskorrekturen: {_credit_list(credits)}. "
+                "Eine weitere Voll-Gutschrift (ohne lineItems) über die ganze Rechnung wurde "
+                "NICHT angelegt. Für eine Teilgutschrift changes.lineItems mitgeben; wenn es "
+                "ausdrücklich gewünscht ist, mit allow_duplicate=true erneut aufrufen."
+            )
+        if credits:
+            notes.append(f"Zu {number} gibt es bereits Rechnungskorrekturen: "
+                         f"{_credit_list(credits)}.")
+    elif not allow_duplicate:
+        blocking, nearby = _chain_followups(client, source, source_id, target_type)
+        part = "Teillieferung" if target_type == "deliverynote" else "Teilrechnung"
+        for other, via in nearby:
+            notes.append(f"In der Belegkette gibt es schon {_DOC_META[target_type]['label']} "
+                         f"{other} (zu {via}) – bitte prüfen, ob das eine {part} ist.")
+        if blocking:
+            raise LexwareError(
+                f"Zu {number} gibt es in der Belegkette schon: "
+                f"{_DOC_META[target_type]['label']} {', '.join(blocking)}. Ein weiterer "
+                "Folgebeleg wurde NICHT angelegt (Gefahr doppelter Rechnung/Lieferung). "
+                "Für eine Teil-Lieferung/-Rechnung oder wenn es ausdrücklich gewünscht ist, "
+                "mit allow_duplicate=true erneut aufrufen."
+            )
 
     # A dunning is special: it references the invoice's existing line items by
     # their id (so the per-item `id` must be kept), and it must NOT inherit the
     # invoice's title/intro/closing text — Lexware applies its own dunning
     # wording, so those are dropped to avoid "Rechnung" leaking onto a Mahnung.
-    is_dunning = target_type == "dunning"
     body = _pursue_body(
         source,
         keep_line_item_ids=is_dunning,
@@ -2289,6 +2834,7 @@ def continue_document(
         # the follow-up — Lexware fills the target's standard texts instead
         extra_doc_drops=_PURSUE_DROP_DUNNING,
     )
+    auto_ship = False
     if target_type == "invoice":
         ship = body.get("shippingConditions") or {}
         if not ship.get("shippingType") or ship.get("shippingType") == "none":
@@ -2296,7 +2842,8 @@ def continue_document(
             body["shippingConditions"] = {
                 "shippingType": "service", "shippingDate": body["voucherDate"]
             }
-    level = len(existing) + 1 if is_dunning else 0
+            auto_ship = True
+    _english_payment_text(body)
     if is_dunning and level >= 2:
         body["title"] = f"{level}. Mahnung"
     if target_type in ("deliverynote", "dunning") or partial_credit:
@@ -2324,23 +2871,205 @@ def continue_document(
                 "weglassen (dann werden die des Ausgangsbelegs übernommen) oder angeben."
             )
     if changes:
-        old_contact = (body.get("address") or {}).get("contactId")
-        body = _apply_changes(body, changes, target_type)
+        old_address = dict(body.get("address") or {})
+        old_contact = old_address.get("contactId")
+        ship_given = _changes_ship(changes)
+        body, change_notes = _apply_changes(client, body, changes, target_type)
+        notes += change_notes
         _resolve_address_in(client, body)
+        address = body.get("address") or {}
+        if address != old_address and looks_like_uuid(str(address.get("contactId") or "")):
+            # a name only counts when the caller wrote it (the source's printed
+            # name may be older than the contact's current one)
+            _complete_contact_address(
+                client, body, notes,
+                check_name=address.get("name") != old_address.get("name"))
         new_contact = (body.get("address") or {}).get("contactId")
         if new_contact != old_contact:
             changes = {**changes, "__customer_changed": True}
+        if auto_ship and not ship_given:
+            # the date of service follows the (changed) invoice date
+            body["shippingConditions"] = {**body["shippingConditions"],
+                                          "shippingDate": body["voucherDate"]}
+    if target_type == "creditnote":
+        _check_credit(body, source, credits, partial_credit)
+    if source_type == "quotation":
+        expires = _day(source.get("expirationDate"))
+        if expires and expires < _today():
+            notes.append(f"Hinweis: Das Angebot {number} war nur bis {expires:%d.%m.%Y} "
+                         "gültig.")
     try:
         created = client.post(
             target_path, body, params={"precedingSalesVoucherId": source_id}
         )
     except LexwareAPIError as exc:
         if exc.status_code in (400, 406):
-            raise LexwareError(
-                _pursue_error(exc, source_type, target_type)
-            ) from exc
+            message = _pursue_error(exc, source_type, target_type)
+            tax = str((body.get("taxConditions") or {}).get("taxType") or "")
+            if tax in _TAX_PREREQUISITES:
+                message = f"{message} {_TAX_PREREQUISITES[tax]}"
+            raise LexwareError(message) from exc
         raise
-    return _pursue_result(client, created, source, source_type, target_type, level, changes)
+    return _pursue_result(client, created, source, source_type, target_type, level, changes,
+                          notes, source_id)
+
+
+def _canonical_changes(changes: Any) -> dict[str, Any] | None:
+    """{"changes": {…}} unwrapped; positionen/positions/items → lineItems, so
+    every check below sees the positions under one name."""
+    if changes is None:
+        return None
+    if not isinstance(changes, dict):
+        raise LexwareError("changes muss ein Objekt sein, z. B. {\"lieferdatum\": \"20.11.2026\"}.")
+    out = dict(unwrap(changes, "changes"))
+    for key in list(out):
+        if key != "lineItems" and key.casefold() in (
+                "lineitems", "positions", "positionen", "items", "line_items", "lines"):
+            value = out.pop(key)
+            out.setdefault("lineItems", value)
+    return out
+
+
+_PAYMENT_CHANGE_KEYS = frozenset({
+    "zahlungsziel", "zahlungsbedingungen", "zahlungsbedingung", "paymentconditions",
+    "payment_conditions", "paymenttermduration", "paymentterms", "payment_terms",
+    "zahlungsfrist", "skonto", "skonto_prozent", "skontoprozent", "skonto_tage",
+    "skontotage", "cashdiscount", "duedate", "due_date", "faelligkeit", "fälligkeit",
+    "zahlbar_bis", "zahlbarbis", "faellig_am", "fällig_am", "payableuntil",
+    "paymentdiscountconditions",
+})
+_DISCOUNT_CHANGE_KEYS = frozenset({
+    "rabatt", "rabatt_prozent", "rabattprozent", "gesamtrabatt", "discount",
+    "discountpercentage", "totaldiscountpercentage", "rabatt_betrag", "rabattbetrag",
+    "totaldiscountabsolute",
+})
+
+
+def _check_unfit_changes(changes: dict[str, Any] | None, target_type: str) -> None:
+    """Fields the target type has no place for must not vanish silently."""
+    if not changes or target_type not in ("deliverynote", "dunning"):
+        return
+    keys = {k.casefold(): k for k in changes}
+    bad = [orig for low, orig in keys.items()
+           if low in _PAYMENT_CHANGE_KEYS or low in _DISCOUNT_CHANGE_KEYS]
+    total = changes.get("totalPrice")
+    if isinstance(total, dict) and any(k in total for k in ("totalDiscountPercentage",
+                                                           "totalDiscountAbsolute")):
+        bad.append("totalPrice (Rabatt)")
+    if not bad:
+        return
+    if target_type == "deliverynote":
+        raise LexwareError(
+            f"{', '.join(bad)} wird bei Lieferscheinen nicht verwendet – ein Lieferschein hat "
+            "keine Zahlungsbedingungen und keinen Rabatt. Bitte weglassen und beim "
+            "Weiterführen zur Rechnung angeben."
+        )
+    raise LexwareError(
+        f"{', '.join(bad)} wird bei Mahnungen nicht verwendet – eine Mahnung übernimmt "
+        "Beträge und Zahlungsbedingungen der Rechnung. Bitte weglassen."
+    )
+
+
+def _changes_ship(changes: dict[str, Any]) -> bool:
+    return any(k.casefold() in (
+        "shippingconditions", "lieferdatum", "leistungsdatum", "deliverydate",
+        "shippingdate", "liefertermin", "servicedate", "ausfuehrungsdatum",
+        "ausführungsdatum", "zeitraum", "leistungszeitraum", "lieferzeitraum",
+        "ausfuehrungszeitraum", "ausführungszeitraum", "serviceperiod", "deliveryperiod")
+        for k in changes)
+
+
+def _english_payment_text(body: dict[str, Any]) -> None:
+    """An English document carrying our German standard payment text → English."""
+    from lxw_cli.core.prepare import is_standard_label, payment_label
+
+    cond = body.get("paymentConditions")
+    if str(body.get("language") or "").casefold() != "en" or not isinstance(cond, dict):
+        return
+    label = str(cond.get("paymentTermLabel") or "")
+    if label and not label.startswith("Payable") and is_standard_label(label) and isinstance(
+            cond.get("paymentTermDuration"), int):
+        cond["paymentTermLabel"] = payment_label(
+            cond["paymentTermDuration"], cond.get("paymentDiscountConditions"), "en")
+
+
+def _day(value: Any) -> Any:
+    from lxw_cli.core.prepare import _day_of
+
+    return _day_of(value)
+
+
+def _today() -> Any:
+    from lxw_cli.core.prepare import _now
+
+    return _now().date()
+
+
+def _credit_list(credits: list[dict[str, Any]]) -> str:
+    parts = []
+    for c in credits:
+        amount = c.get("gross")
+        parts.append(f"{c['number']}" + (f" ({amount:.2f} €)" if isinstance(
+            amount, (int, float)) else ""))
+    return ", ".join(parts)
+
+
+def _line_gross(item: dict[str, Any], tax_type: str) -> float | None:
+    price = item.get("unitPrice") if isinstance(item.get("unitPrice"), dict) else None
+    if item.get("type") == "text":
+        return 0.0
+    if not price:
+        return None
+    quantity = item.get("quantity", 1)
+    rate = price.get("taxRatePercentage") or 0
+    if not all(isinstance(v, (int, float)) for v in (quantity, rate)):
+        return None
+    if price.get("grossAmount") is not None and tax_type == "gross":
+        unit = price["grossAmount"]
+    elif price.get("netAmount") is not None:
+        unit = price["netAmount"] * (1 + rate / 100)
+    elif price.get("grossAmount") is not None:
+        unit = price["grossAmount"]
+    else:
+        return None
+    if not isinstance(unit, (int, float)):
+        return None
+    discount = item.get("discountPercentage") or 0
+    return float(unit) * float(quantity) * (1 - float(discount) / 100)
+
+
+def _check_credit(
+    body: dict[str, Any], source: dict[str, Any], credits: list[dict[str, Any]],
+    partial: bool,
+) -> None:
+    """Before Lexware answers a bare "A validation error occurred.": credit note
+    dated before the invoice, or more than is left of the invoice."""
+    number = source.get("voucherNumber") or "der Rechnung"
+    start, day = _day(source.get("voucherDate")), _day(body.get("voucherDate"))
+    if start and day and day < start:
+        raise LexwareError(
+            f"Die Rechnungskorrektur ({day:%d.%m.%Y}) darf nicht vor dem Datum der Rechnung "
+            f"{number} ({start:%d.%m.%Y}) liegen – bitte ein späteres Belegdatum angeben."
+        )
+    if not partial:
+        return
+    tax_type = str((body.get("taxConditions") or {}).get("taxType") or "net")
+    lines = [_line_gross(i, tax_type) for i in body.get("lineItems") or []
+             if isinstance(i, dict)]
+    invoice_total = (source.get("totalPrice") or {}).get("totalGrossAmount")
+    if None in lines or not isinstance(invoice_total, (int, float)):
+        return
+    already = sum(c["gross"] for c in credits if isinstance(c.get("gross"), (int, float)))
+    left = round(invoice_total - already, 2)
+    wanted = round(sum(lines), 2)
+    if wanted > left + 0.01:
+        detail = (f" (Rechnung {invoice_total:.2f} € abzüglich {_credit_list(credits)})"
+                  if credits else "")
+        raise LexwareError(
+            f"Die Gutschrift ({wanted:.2f} € brutto) ist höher als der noch nicht "
+            f"gutgeschriebene Betrag von {number}: {left:.2f} €{detail}. Lexware lehnt das ab "
+            "– bitte den Betrag prüfen."
+        )
 
 
 _OPTIONAL_KEYS = ("optional", "alternative")
@@ -2361,35 +3090,92 @@ def _check_optional_positions(source: dict[str, Any], source_type: str) -> None:
         )
 
 
+def _related_doc(client: LexwareClient, rel: dict[str, Any]) -> dict[str, Any] | None:
+    meta = _DOC_META.get({"dun": "dunning"}.get(str(rel.get("voucherType", "")).lower(),
+                                                str(rel.get("voucherType", "")).lower()))
+    if not meta or not rel.get("id"):
+        return None
+    try:
+        doc = client.get(meta["path"].format(id=rel["id"]))
+    except Exception:  # unreadable
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 def _real_followups(
-    client: LexwareClient, source: dict[str, Any], target_type: str
-) -> list[str]:
+    client: LexwareClient, source: dict[str, Any], target_type: str, *, details: bool = False
+) -> list[Any]:
     """Related vouchers of the target type that really FOLLOW the source.
 
     relatedVouchers has no direction: an invoice made from LS0001 lists LS0001
     too. Predecessors (created before the source) and voided documents are
-    left out.
+    left out. With `details` each hit is {number, gross} instead of the number.
     """
-    meta = _DOC_META.get(target_type)
-    found: list[str] = []
+    found: list[Any] = []
     source_created = str(source.get("createdDate") or "")
     wanted = {"dunning": ("dun", "dunning")}.get(target_type, (target_type,))
     for rel in source.get("relatedVouchers") or []:
         if not isinstance(rel, dict) or str(rel.get("voucherType", "")).lower() not in wanted:
             continue
-        doc: dict[str, Any] = {}
-        if meta and rel.get("id"):
-            try:
-                doc = client.get(meta["path"].format(id=rel["id"]))
-            except Exception:  # unreadable → count it, safer
-                doc = {}
+        doc = _related_doc(client, rel) or {}  # unreadable → count it, safer
         if doc.get("voucherStatus") == "voided":
             continue
         created = str(doc.get("createdDate") or "")
         if created and source_created and created < source_created:
             continue  # predecessor, e.g. the delivery note this invoice came from
-        found.append(str(rel.get("voucherNumber") or rel.get("id")))
+        label = str(rel.get("voucherNumber") or rel.get("id"))
+        if details:
+            found.append({"number": label,
+                          "gross": (doc.get("totalPrice") or {}).get("totalGrossAmount")})
+        else:
+            found.append(label)
     return found
+
+
+def _chain_followups(
+    client: LexwareClient, source: dict[str, Any], source_id: str, target_type: str
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Follow-ups of the target type next to the source in the chain.
+
+    Returns (direct, indirect): the source's own follow-ups (they block) and
+    those of its predecessors as (number, predecessor number) — e.g. AG →
+    LS0037 and AG → RE: RE → Lieferschein may be a second delivery note, or a
+    partial one; that is only pointed out. The source's own predecessor (RE
+    made from LS0001) is no duplicate at all."""
+    found = list(_real_followups(client, source, target_type))
+    indirect: list[tuple[str, str]] = []
+    if target_type not in ("deliverynote", "invoice"):
+        return found, indirect
+    source_created = str(source.get("createdDate") or "")
+    for rel in source.get("relatedVouchers") or []:
+        if not isinstance(rel, dict) or rel.get("id") == source_id:
+            continue
+        rtype = str(rel.get("voucherType", "")).lower()
+        if rtype not in ("quotation", "orderconfirmation", "deliverynote", "invoice"):
+            continue
+        doc = _related_doc(client, rel)
+        if not doc or doc.get("voucherStatus") == "voided":
+            continue
+        created = str(doc.get("createdDate") or "")
+        if not (created and source_created and created < source_created):
+            continue  # only predecessors
+        for rel2 in doc.get("relatedVouchers") or []:
+            if (not isinstance(rel2, dict) or rel2.get("id") == source_id
+                    or str(rel2.get("voucherType", "")).lower() != target_type):
+                continue
+            label2 = str(rel2.get("voucherNumber") or rel2.get("id"))
+            if label2 in found or label2 in (n for n, _ in indirect):
+                continue
+            doc2 = _related_doc(client, rel2)
+            if doc2 is None or doc2.get("voucherStatus") == "voided":
+                continue
+            linked = {str(r.get("id")) for r in doc2.get("relatedVouchers") or []
+                      if isinstance(r, dict)}
+            if source_id in linked:
+                continue  # in the source's own line (its predecessor), no sibling
+            if str(doc2.get("createdDate") or "") >= created:
+                indirect.append((label2, str(rel.get("voucherNumber") or rel.get("id"))))
+    return found, indirect
 
 
 def _existing_followups(source: dict[str, Any], target_type: str) -> list[str]:
@@ -2402,6 +3188,19 @@ def _existing_followups(source: dict[str, Any], target_type: str) -> list[str]:
     ]
 
 
+def _dunning_states(client: LexwareClient, source: dict[str, Any]) -> list[tuple[str, str]]:
+    """(number, status) of the invoice's dunnings; unreadable → "unbekannt"."""
+    out = []
+    for rel in source.get("relatedVouchers") or []:
+        if not isinstance(rel, dict) or str(rel.get("voucherType", "")).lower() not in (
+                "dun", "dunning"):
+            continue
+        doc = _related_doc(client, rel)
+        state = str((doc or {}).get("voucherStatus") or "unbekannt")
+        out.append((str(rel.get("voucherNumber") or rel.get("id")), state))
+    return out
+
+
 def _resolve_address_in(client: LexwareClient, body: dict[str, Any]) -> None:
     """A customer given in `changes` by number/name → contactId."""
     address = body.get("address")
@@ -2412,8 +3211,8 @@ def _resolve_address_in(client: LexwareClient, body: dict[str, Any]) -> None:
 
 
 def _apply_changes(
-    body: dict[str, Any], changes: dict[str, Any], target_type: str
-) -> dict[str, Any]:
+    client: LexwareClient, body: dict[str, Any], changes: dict[str, Any], target_type: str
+) -> tuple[dict[str, Any], list[str]]:
     """Caller's adjustments for the follow-up (date, delivery date, payment
     terms, positions, texts) — normalized like a new document."""
     if not isinstance(changes, dict):
@@ -2421,16 +3220,98 @@ def _apply_changes(
     from lxw_cli.core.prepare import prepare_changes
 
     tax_type = str((body.get("taxConditions") or {}).get("taxType") or "net")
-    patch = prepare_changes(changes, target_type, tax_type, body.get("voucherDate"))
+    language = body.get("language")
+    currency = str((body.get("totalPrice") or {}).get("currency") or "EUR")
+    patch = prepare_changes(
+        {k: v for k, v in changes.items() if not k.startswith("__")}, target_type, tax_type,
+        body.get("voucherDate"), client=client, language=language, currency=currency)
+    notes = [n for n in (patch.pop("__hinweis", None),) if n]
     out = dict(body)
     for key, value in patch.items():
         if key == "address":
-            out[key] = value  # a different customer replaces the address wholesale
+            out[key] = _merge_address(out.get("address"), value)
+        elif key == "paymentConditions" and isinstance(value, dict):
+            out[key] = _merge_payment(out.get(key), value, language, notes)
+        elif key == "totalPrice" and isinstance(value, dict):
+            out[key] = _merge_total(out.get(key), value)
         elif isinstance(value, dict) and isinstance(out.get(key), dict) and key != "lineItems":
             out[key] = {**out[key], **value}
         else:
             out[key] = value
-    return out
+    return out, notes
+
+
+def _merge_address(old: Any, new: Any) -> Any:
+    """changes.address: a new customer replaces it, a full one-off address too;
+    single fields (supplement, contact person) are merged into the source's."""
+    if not isinstance(new, dict) or not isinstance(old, dict):
+        return new
+    if new.get("contactId"):
+        if new.get("contactId") == old.get("contactId"):
+            return {**old, **new}
+        return new
+    if new.get("name") and (new.get("zip") or new.get("city") or new.get("street")):
+        return new  # a complete one-off address
+    return {**old, **new}
+
+
+def _merge_payment(old: Any, new: dict[str, Any], language: Any, notes: list[str]) -> Any:
+    """Payment changes onto the source's terms: Skonto stays unless removed,
+    the label is rebuilt from term + Skonto (never "ohne Abzug" with Skonto)."""
+    from lxw_cli.core.prepare import payment_label
+
+    new = dict(new)
+    auto = bool(new.pop("__autolabel", False))
+    old = dict(old) if isinstance(old, dict) else {}
+    merged = {**old, **new}
+    removed = "paymentDiscountConditions" in new and new["paymentDiscountConditions"] is None
+    if removed:
+        merged.pop("paymentDiscountConditions", None)
+        if old.get("paymentDiscountConditions"):
+            notes.append("Skonto des Ausgangsbelegs entfernt.")
+    kept = (not removed and "paymentDiscountConditions" not in new
+            and isinstance(old.get("paymentDiscountConditions"), dict)
+            and old["paymentDiscountConditions"].get("discountPercentage"))
+    duration = merged.get("paymentTermDuration")
+    if not isinstance(duration, int):
+        if merged.get("paymentDiscountConditions"):
+            raise LexwareError(
+                "Für das Skonto fehlt die Zahlungsfrist – der Ausgangsbeleg hat keine. Bitte "
+                "auch zahlungsziel in Tagen angeben (z. B. {\"zahlungsziel\": 30, "
+                "\"skonto\": \"2 % 10 Tage\"})."
+            )
+        if "paymentTermLabel" in new and not auto:
+            return merged  # an own text without a term, as given (like on create)
+        raise LexwareError(
+            "Für die Zahlungsbedingung fehlt die Frist – bitte zahlungsziel in Tagen angeben "
+            "(z. B. 14)."
+        )
+    if "paymentTermLabel" not in new or auto:
+        # not the caller's own text: rebuilt from term + (kept/new/removed) Skonto
+        merged["paymentTermLabel"] = payment_label(
+            duration, merged.get("paymentDiscountConditions"), language)
+    if kept and "paymentTermDuration" in new:
+        disc = old["paymentDiscountConditions"]
+        notes.append(
+            f"Skonto aus dem Ausgangsbeleg bleibt erhalten ({disc.get('discountPercentage')} % "
+            f"bei Zahlung innerhalb von {disc.get('discountRange')} Tagen) – ohne Skonto: "
+            "changes skonto: 0."
+        )
+    return merged
+
+
+def _merge_total(old: Any, new: dict[str, Any]) -> dict[str, Any]:
+    """Overall discount switched between % and € (never both); 0 removes it."""
+    merged = {**(old if isinstance(old, dict) else {}),
+              **{k: v for k, v in new.items() if k != "currency" or v}}
+    if "totalDiscountAbsolute" in new:
+        merged.pop("totalDiscountPercentage", None)
+    if "totalDiscountPercentage" in new:
+        merged.pop("totalDiscountAbsolute", None)
+    for key in ("totalDiscountPercentage", "totalDiscountAbsolute"):
+        if key in merged and merged[key] in (0, None):
+            merged.pop(key)
+    return merged
 
 
 def _pursue_result(
@@ -2441,6 +3322,8 @@ def _pursue_result(
     target_type: str,
     level: int,
     changes: dict[str, Any] | None,
+    notes: list[str] | None = None,
+    source_id: str | None = None,
 ) -> Any:
     """The new document's key data plus what the caller should know."""
     if not isinstance(created, dict) or not created.get("id"):
@@ -2450,7 +3333,7 @@ def _pursue_result(
     except Exception:  # best effort — the document exists
         return created
     total = doc.get("totalPrice") or {}
-    notes: list[str] = []
+    notes = list(notes or [])
     number = source.get("voucherNumber")
     if source_type == "quotation" and source.get("voucherStatus") == "draft":
         notes.append(f"Lexware hat das Angebot {number} dabei festgeschrieben "
@@ -2461,14 +3344,17 @@ def _pursue_result(
             f"({total.get('totalGrossAmount')} € brutto) – das entspricht einem Storno. "
             "Für eine Teilgutschrift beim Weiterführen changes.lineItems mitgeben."
         )
+    voucher_number = doc.get("voucherNumber")
     if target_type == "dunning":
         notes.append(f"Mahnstufe {level}.")
+        if not voucher_number and source_id:
+            voucher_number = _dunning_number_from_invoice(client, source_id, created["id"])
     if (changes or {}).get("__customer_changed"):
         notes.append("Achtung: Der Folgebeleg geht an einen ANDEREN Kunden als der "
                      f"Ausgangsbeleg {number}.")
     result = {
         "id": doc.get("id"),
-        "voucherNumber": doc.get("voucherNumber"),
+        "voucherNumber": voucher_number,
         "voucherType": target_type,
         "voucherStatus": doc.get("voucherStatus"),
         "voucherDate": doc.get("voucherDate"),
@@ -2476,6 +3362,7 @@ def _pursue_result(
         "totalNetAmount": total.get("totalNetAmount"),
         "totalGrossAmount": total.get("totalGrossAmount"),
         "totalDiscountPercentage": total.get("totalDiscountPercentage"),
+        "totalDiscountAbsolute": total.get("totalDiscountAbsolute"),
         "precedingVoucher": number,
         "resourceUri": created.get("resourceUri"),
     }
@@ -2483,6 +3370,20 @@ def _pursue_result(
     if notes:
         result["hinweis"] = " ".join(notes)
     return result
+
+
+def _dunning_number_from_invoice(
+    client: LexwareClient, invoice_id: str, dunning_id: str
+) -> Any:
+    """The dunning number ("RE0003_2") as the invoice lists it."""
+    try:
+        invoice = client.get(f"/v1/invoices/{invoice_id}")
+    except Exception:  # best effort
+        return None
+    for rel in invoice.get("relatedVouchers") or []:
+        if isinstance(rel, dict) and rel.get("id") == dunning_id:
+            return rel.get("voucherNumber")
+    return None
 
 
 _STATE_TEXT = {"paid": "bereits bezahlt", "paidoff": "bereits ausgeglichen",
@@ -2495,7 +3396,13 @@ def _check_source_state(
     """Say why Lexware will refuse before it answers with a bare 406."""
     status = str(source.get("voucherStatus") or "")
     number = source.get("voucherNumber") or identifier.strip()
-    label = _DOC_META.get(source_type, {}).get("label", "Beleg")
+    the = _definite(source_type)
+    if source_type == "dunning":
+        raise LexwareError(
+            "Zu einer Mahnung gibt es keine Rechnungskorrektur – bitte die gemahnte Rechnung "
+            "angeben." if target_type == "creditnote" else
+            "Eine Mahnung lässt sich nicht weiterführen – bitte die gemahnte Rechnung angeben."
+        )
     if target_type == "dunning" and source_type != "invoice":
         raise LexwareError(
             f"Nur Rechnungen lassen sich mahnen – {number} ist {_kind_phrase(source_type)}."
@@ -2507,14 +3414,19 @@ def _check_source_state(
             " Erst in Lexware abschließen, dann mahnen." if status == "draft"
             else " Eine Mahnung ist nur für offene Rechnungen möglich."
         )
-        raise LexwareError(f"Die {label} {number} ist {_STATE_TEXT[status]}.{hint}")
+        raise LexwareError(f"{the} {number} ist {_STATE_TEXT[status]}.{hint}")
     if status == "voided":
         raise LexwareError(
-            f"{label} {number} ist storniert und kann nicht weitergeführt werden."
+            f"{the} {number} ist storniert und kann nicht weitergeführt werden."
+        )
+    if target_type == "creditnote" and status == "paidoff":
+        raise LexwareError(
+            f"{the} {number} ist bereits ausgeglichen (z. B. durch eine Rechnungskorrektur) – "
+            "eine weitere Rechnungskorrektur lehnt Lexware ab."
         )
     if target_type == "creditnote" and status == "draft":
         raise LexwareError(
-            f"Die {label} {number} ist noch ein Entwurf – eine Rechnungskorrektur geht "
+            f"{the} {number} ist noch ein Entwurf – eine Rechnungskorrektur geht "
             "nur zu einer abgeschlossenen Rechnung. Den Entwurf stattdessen in Lexware "
             "ändern oder löschen."
         )
@@ -2546,10 +3458,27 @@ def _resolve_source(
     # (tolerant lookup: spaces, missing prefix, duplicates).
     prefer = ("invoice" if target_hint in ("dunning", "creditnote")
               else "quotation,orderconfirmation,deliverynote,invoice,creditnote")
-    match = find_voucher(client, ident, ALL_VOUCHER_TYPES, prefer=prefer)
+    if target_hint == "dunning":
+        # a dunning only ever belongs to an outgoing invoice — an ending like
+        # "…-4" of a bookkeeping voucher must not win over RE0004
+        try:
+            match = find_voucher(client, ident, "invoice,salesinvoice", prefer="invoice")
+        except LexwareError as first:
+            try:
+                other = find_voucher(client, ident, ALL_VOUCHER_TYPES, prefer=prefer)
+            except LexwareError:
+                raise first from None
+            other_type = _SOURCE_TYPE_NORMALIZE.get(other.type or "", other.type)
+            label = (other.row or {}).get("voucherNumber") or ident
+            raise LexwareError(
+                f"Nur Rechnungen lassen sich mahnen – {label} ist {_kind_phrase(other_type)}."
+            ) from None
+    else:
+        match = find_voucher(client, ident, ALL_VOUCHER_TYPES, prefer=prefer)
     if match.ambiguous:
         raise LexwareError(
-            f"{match.note} Bitte den Ausgangsbeleg mit voller Nummer oder id angeben."
+            f"{_candidates_text(match)} Bitte den Ausgangsbeleg mit voller Nummer oder id "
+            "angeben (oder mit der Belegart, z. B. „Angebot 109“)."
         )
     row = match.row or {"id": match.id, "voucherType": match.type}
     raw_type = row.get("voucherType", "")
@@ -2609,6 +3538,13 @@ def _pursue_error(exc: LexwareAPIError, source_type: str, target_type: str) -> s
             return f"Weiterführen zu '{to_label}' nicht möglich: {joined}."
 
     message = (body.get("message") or "").strip()
+    if target_type == "creditnote" and re.match(r"^\s*A validation error occurred", message):
+        return (
+            "Lexware hat die Rechnungskorrektur abgelehnt (Prüffehler ohne Details) – "
+            "häufig, weil sie höher ist als der noch offene bzw. nicht gutgeschriebene Betrag "
+            "der Rechnung oder die Rechnung schon ausgeglichen ist. Bitte Betrag und "
+            "Zahlungsstand der Rechnung prüfen."
+        )
     if "finali" in message.lower():
         return (
             f"Der Ausgangsbeleg ({from_label}) ist noch ein Entwurf. Er muss in "
@@ -2616,7 +3552,9 @@ def _pursue_error(exc: LexwareAPIError, source_type: str, target_type: str) -> s
             "weitergeführt werden kann."
         )
     if message:
-        return f"Weiterführen zu '{to_label}' nicht möglich: {message}"
+        from lxw_cli.core.client import _translate_text
+
+        return f"Weiterführen zu '{to_label}' nicht möglich: {_translate_text(message, 406)}"
 
     return (
         f"Dieser {from_label} lässt sich gerade nicht zu '{to_label}' weiterführen "
@@ -2647,8 +3585,10 @@ def _pursue_body(
     if keep_line_item_ids:
         drop_line_item = drop_line_item - {"id"}
     doc_drops = _PURSUE_DROP_DOC | extra_doc_drops
+    from lxw_cli.core.prepare import _format, _now
+
     body = {k: v for k, v in source.items() if k not in doc_drops}
-    body["voucherDate"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    body["voucherDate"] = _format(_now())  # Berlin time, like a new document
     # For article positions (material/service) `id` is the ARTICLE id and must
     # stay — only free positions lose theirs. (Dropping it made every follow-up
     # of a document with an article fail: "lineItems[0].id darf nicht leer sein".)
@@ -2690,8 +3630,8 @@ def create_dunning(client: LexwareClient, identifier: str) -> dict[str, Any]:
     `identifier` is the invoice's number or id. Delegates to the pursue logic
     (invoice → dunning): the invoice must be finalized and still have an open
     amount, otherwise a clear message is returned instead of a raw HTTP error.
-    The dunning is created as a draft; repeating the call escalates Lexware's
-    dunning level. Returns the new dunning (its id is the only later handle).
+    The dunning is created as a draft; while a dunning draft exists no further
+    one is created. Returns the new dunning with its number ("RE0003_2").
     """
     try:
         return continue_document(client, identifier, "dunning")
@@ -2705,20 +3645,25 @@ def create_dunning(client: LexwareClient, identifier: str) -> dict[str, Any]:
 
 
 def _overdue_of_customer(client: LexwareClient, name: str) -> str | None:
-    """For "Mahnung an Pixelwerk": list that customer's overdue invoices."""
+    """For "Mahnung an Pixelwerk": list that customer's open (dunnable) invoices."""
     try:
         contact_id = resolve_contact_id(client, name)
-        rows = list_invoices(client, status="overdue", contact_id=contact_id, limit=10).items
+        rows = list_invoices(client, status="overdue,open", contact_id=contact_id,
+                             limit=25).items
     except LexwareError:
         return None
+    # only invoices written in Lexware can be dunned — no bookkeeping vouchers
+    rows = [r for r in rows if r.get("voucherType") == "invoice"][:10]
     if not rows:
-        return f"'{name}' ist ein Kunde, aber er hat keine überfällige Rechnung."
+        return f"'{name}' ist ein Kunde, aber er hat keine offene Rechnung, die sich mahnen lässt."
     listing = ", ".join(
         f"{r.get('voucherNumber')} ({r.get('openAmount', r.get('totalAmount'))} € offen, "
-        f"fällig {str(r.get('dueDate') or '')[:10]})" for r in rows
+        f"fällig {str(r.get('dueDate') or '')[:10]}"
+        + (", überfällig" if r.get("voucherStatus") == "overdue" else "") + ")"
+        for r in rows
     )
     return (
-        f"'{name}' ist ein Kunde, keine Rechnungsnummer. Überfällige Rechnungen: {listing}. "
+        f"'{name}' ist ein Kunde, keine Rechnungsnummer. Offene Rechnungen: {listing}. "
         "Bitte die Mahnung mit der Rechnungsnummer anlegen."
     )
 
@@ -2728,25 +3673,45 @@ def get_dunning(client: LexwareClient, dunning_id: str) -> dict[str, Any]:
     text = str(dunning_id or "").strip()
     if looks_like_uuid(text):
         try:
-            return client.get(f"/v1/dunnings/{text}")
+            doc = client.get(f"/v1/dunnings/{text}")
         except LexwareAPIError as exc:
             if exc.status_code != 404:
                 raise
-    resolved, note = _dunning_id(client, text)
-    return _with_note(client.get(f"/v1/dunnings/{resolved}"), note)
+        else:
+            number = doc.get("voucherNumber") or _dunning_number_of(client, doc, text)
+            return {**doc, "voucherNumber": number} if number else doc
+    ref = _dunning_ref(client, text)
+    doc = client.get(f"/v1/dunnings/{ref.id}")
+    return _with_note({**doc, "voucherNumber": doc.get("voucherNumber") or ref.number},
+                      ref.note)
+
+
+def _dunning_number_of(client: LexwareClient, doc: dict[str, Any], dunning_id: str) -> Any:
+    """A dunning's number ("RE0003_2") from the invoice's related vouchers."""
+    for rel in doc.get("relatedVouchers") or []:
+        if not isinstance(rel, dict) or str(rel.get("voucherType")).lower() != "invoice":
+            continue
+        try:
+            invoice = client.get(f"/v1/invoices/{rel['id']}")
+        except Exception:  # best effort
+            return None
+        for dun in invoice.get("relatedVouchers") or []:
+            if isinstance(dun, dict) and dun.get("id") == dunning_id:
+                return dun.get("voucherNumber")
+    return None
 
 
 def download_dunning_pdf(client: LexwareClient, dunning_id: str) -> bytes:
     """A dunning's PDF (id, number like "RE0001_2" or the invoice's number)."""
     text = str(dunning_id or "").strip()
     if not looks_like_uuid(text):
-        text = _dunning_id(client, text)[0]
+        text = _dunning_ref(client, text).id
     try:
         return get_pdf_with_voucher_fallback(client, f"/v1/dunnings/{text}/file", text)
     except LexwareAPIError as exc:
         if exc.status_code != 404:
             raise
-        resolved = _dunning_id(client, text)[0]
+        resolved = _dunning_ref(client, text).id
         if resolved == text:
             raise
         return get_pdf_with_voucher_fallback(
@@ -2754,48 +3719,66 @@ def download_dunning_pdf(client: LexwareClient, dunning_id: str) -> bytes:
         )
 
 
+@dataclass
+class DunningRef:
+    id: str
+    number: str | None
+    invoice: str
+    note: str | None
+    all: list[dict[str, Any]]
+
+
+_DUNNABLE_TYPES = ("invoice", "salesinvoice", "downpaymentinvoice")
+
+
 def _dunning_id(client: LexwareClient, value: str) -> tuple[str, str | None]:
-    """Dunning id from an id, a dunning number or the invoice it belongs to.
+    ref = _dunning_ref(client, value)
+    return ref.id, ref.note
+
+
+def _dunning_ref(client: LexwareClient, value: str) -> DunningRef:
+    """Dunning from an id, a dunning number or the invoice it belongs to.
 
     Dunnings are not in the voucherlist, but the invoice lists them among its
     related vouchers ("RE0001_1", "RE0001_2"). Without a level the latest is
     taken.
     """
     text = str(value or "").strip()
-    if looks_like_uuid(text):
-        # not a dunning id (caller tried that) — maybe the invoice's id
-        invoice_ref, wanted = text, None
-    else:
+    if not looks_like_uuid(text):
         _require_text(text)
-        invoice_ref, wanted = text, None
+    invoice_ref, wanted = text, None
     try:
         try:
-            invoice = get_voucher_details(client, invoice_ref, INVOICE_LIKE_TYPES)
+            match = locate_voucher(client, invoice_ref, INVOICE_LIKE_TYPES)
         except LexwareError:
-            m = re.match(r"^(.+?)_(\d{1,2})$", text)  # dunning number "RE0001_2"
+            m = _DUNNING_NUMBER.match(_clean_number(text))  # dunning number "RE0001_2"
             if not m:
                 raise
-            invoice_ref, wanted = m.group(1), text
-            invoice = get_voucher_details(client, invoice_ref, INVOICE_LIKE_TYPES)
+            invoice_ref, wanted = m.group(1), _clean_number(text)
+            match = locate_voucher(client, invoice_ref, INVOICE_LIKE_TYPES)
     except LexwareError as exc:
         raise LexwareError(
             f"Keine Mahnung zu '{text}' gefunden. Erwartet wird die id der Mahnung, "
             "ihre Nummer (z. B. RE0001_1) oder die Nummer der gemahnten Rechnung."
         ) from exc
+    number = (match.row or {}).get("voucherNumber") or invoice_ref
+    if match.type and match.type not in _DUNNABLE_TYPES:
+        raise LexwareError(
+            f"{number} ist {_kind_phrase(match.type)} – Mahnungen gibt es nur zu Rechnungen."
+        )
+    invoice = get_voucher_details(client, match.id, match.type or INVOICE_LIKE_TYPES)
+    number = invoice.get("voucherNumber") or number
     dunnings = [
         r for r in invoice.get("relatedVouchers") or []
         # Lexware lists them as voucherType "dun" (seen live 10.11.2026)
         if isinstance(r, dict) and str(r.get("voucherType")).lower() in ("dun", "dunning")
     ]
-    number = invoice.get("voucherNumber") or invoice_ref
-    hint_type = None
-    for t in _DETAIL_PATHS:
-        if invoice.get("hinweis") and _type_label(t) in str(invoice.get("hinweis")):
-            hint_type = t
-            break
-    if not dunnings and hint_type and hint_type not in ("invoice", "salesinvoice"):
+    hint = re.search(r"ist ein Beleg der Art (.+?) \(", str(invoice.get("hinweis") or ""))
+    found_type = next((t for t, label in VOUCHER_TYPE_LABELS.items()
+                       if hint and label == hint.group(1)), None)
+    if not dunnings and found_type and found_type not in _DUNNABLE_TYPES:
         raise LexwareError(
-            f"{number} ist {_kind_phrase(hint_type)} – Mahnungen gibt es nur zu Rechnungen."
+            f"{number} ist {_kind_phrase(found_type)} – Mahnungen gibt es nur zu Rechnungen."
         )
     if not dunnings:
         raise LexwareError(f"Zur Rechnung {number} gibt es keine Mahnung.")
@@ -2805,8 +3788,10 @@ def _dunning_id(client: LexwareClient, value: str) -> tuple[str, str | None]:
         if not exact:
             have = ", ".join(str(r.get("voucherNumber")) for r in dunnings)
             raise LexwareError(f"Mahnung {wanted} gibt es nicht. Vorhanden: {have}.")
-        dunnings = exact
-    pick = dunnings[-1]
+        chosen = exact
+    else:
+        chosen = dunnings
+    pick = chosen[-1]
     note = None if wanted else (
         f"Mahnung {pick.get('voucherNumber')} zur Rechnung {number}"
         + (
@@ -2815,7 +3800,8 @@ def _dunning_id(client: LexwareClient, value: str) -> tuple[str, str | None]:
             else "."
         )
     )
-    return str(pick["id"]), note
+    return DunningRef(id=str(pick["id"]), number=pick.get("voucherNumber"),
+                      invoice=str(number), note=note, all=dunnings)
 
 
 def _require_text(value: str) -> None:
@@ -2880,6 +3866,26 @@ def list_contacts(
         vendor=vendor, include_archived=include_archived, limit=limit,
         fetch_all=fetch_all,
     )
+    variants = _spellings(name) if name else []
+    if variants:
+        # Lexware matches literally: "mueller" misses "Müller GmbH" — ask for
+        # every spelling (ä/ae, ö/oe, ü/ue, ß/ss) and merge.
+        max_items = resolve_max_items(limit, fetch_all)
+        merged = {str(r.get("id")): r for r in result.items}
+        for variant in variants:
+            if max_items is not None and len(merged) >= max_items:
+                break
+            for row in _list_contacts_raw(
+                client, name=variant, email=email, number=number, customer=customer,
+                vendor=vendor, include_archived=include_archived, limit=limit,
+                fetch_all=fetch_all,
+            ).items:
+                merged.setdefault(str(row.get("id")), row)
+        if len(merged) > len(result.items):
+            items = list(merged.values())
+            if max_items is not None:
+                items = items[:max_items]
+            result = ListResult(items=items, search=True)
     if not result.items and (name or email):
         # Lexware matches the company/person name only, literally: no contact
         # persons, "Groesse" ≠ "Größe". Fall back to our own search.
@@ -2888,6 +3894,21 @@ def list_contacts(
             include_archived=include_archived, limit=limit, fetch_all=fetch_all,
         )
     return result
+
+
+_UMLAUTS = (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("Ä", "Ae"), ("Ö", "Oe"), ("Ü", "Ue"),
+            ("ß", "ss"))
+
+
+def _spellings(name: str) -> list[str]:
+    """The other spellings of a name: "Müller" ↔ "Mueller" (without the name itself)."""
+    ascii_ = name
+    for umlaut, plain in _UMLAUTS:
+        ascii_ = ascii_.replace(umlaut, plain)
+    umlaut_ = name
+    for umlaut, plain in _UMLAUTS[:6]:
+        umlaut_ = umlaut_.replace(plain, umlaut)
+    return [v for v in dict.fromkeys((ascii_, umlaut_)) if v != name]
 
 
 # Lexware stores contact names/e-mails HTML-escaped and expects the filter
@@ -3007,8 +4028,25 @@ def _get_or_404(client: LexwareClient, path: str, what: str) -> dict[str, Any]:
 
 
 def create_contact(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    allow = False
+    if isinstance(body, dict):
+        body = dict(unwrap(body, "body", "contact", "kontakt"))
+        for key in ("allow_duplicate", "allowDuplicate", "doppelt_erlaubt"):
+            if key in body:
+                allow = bool_word(body.pop(key)) is True
     body = normalize_contact(body)
     validate_contact(body)
+    if not allow:
+        name = _contact_label(body) if (body.get("company") or body.get("person")) else ""
+        same = _exact_contacts(client, name) if name and name != "None" else []
+        if same:
+            raise LexwareError(
+                f"Einen Kontakt '{name}' gibt es schon: "
+                + "; ".join(_contact_brief(r) for r in same)
+                + ". Er wurde NICHT neu angelegt. Bitte den vorhandenen verwenden (bzw. mit "
+                "update_contact ändern) – für einen weiteren Kontakt mit demselben Namen im "
+                "body \"allow_duplicate\": true angeben."
+            )
     created = client.post("/v1/contacts", body)
     return _reread(client, "/v1/contacts", created)
 
@@ -3036,9 +4074,19 @@ def update_contact(
     """
     contact_id = resolve_contact_id(client, contact_id)
     current = _get_or_404(client, f"/v1/contacts/{contact_id}", "Kontakt")
+    changes = dict(unwrap(changes, "changes")) if isinstance(changes, dict) else changes
     if not changes:
         return {**current, "hinweis": "Keine Änderungen übergeben – nichts gespeichert."}
     changes = _guard_archived_unchanged(current, changes)
+    for key in CONTACT_KIND_KEYS:
+        if key in changes:
+            kind = contact_kind(changes.pop(key))
+            is_person = bool(current.get("person")) and not current.get("company")
+            if kind and (kind == "person") != is_person:
+                raise LexwareError(
+                    "Die Art des Kontakts (Privatperson/Firma) lässt sich über die Lexware-API "
+                    "nicht ändern. Bitte einen neuen Kontakt der richtigen Art anlegen."
+                )
     if "name" in changes and current.get("person") and not current.get("company"):
         full = str(changes.pop("name") or "").strip().split()
         person: dict[str, Any] = {"lastName": full[-1]} if full else {}
@@ -3047,6 +4095,7 @@ def update_contact(
         changes["person"] = {**(changes.get("person") or {}), **person}
     changes = _merge_billing(current, changes)
     changes = normalize_contact(changes, partial=True)
+    notes = _merge_contact_person(current, changes) + _replaced_contact_data(current, changes)
     _guard_roles_kept(current, changes)
     if "roles" in changes and isinstance(changes["roles"], dict):
         # roles merge: an existing role keeps its number
@@ -3065,57 +4114,127 @@ def update_contact(
     merged = _merge_for_update(current, changes)
     _guard_single_contact_person(merged)
     validate_contact(merged)
-    return _put_and_reread(client, f"/v1/contacts/{contact_id}", merged, current)
+    result = _put_and_reread(client, f"/v1/contacts/{contact_id}", merged, current)
+    if notes and isinstance(result, dict):
+        result = _with_note(result, " ".join(notes))
+    return result
+
+
+def _person_name(person: dict[str, Any], *, accusative: bool = False) -> str:
+    salutation = str(person.get("salutation") or "").strip()
+    if accusative and salutation == "Herr":
+        salutation = "Herrn"
+    return " ".join(p for p in (salutation, person.get("firstName"), person.get("lastName"))
+                    if p)
+
+
+def _merge_contact_person(current: dict[str, Any], changes: dict[str, Any]) -> list[str]:
+    """Lexware keeps ONE contact person: the same person is merged (salutation,
+    e-mail, phone stay), another one replaces the old one — said in a note."""
+    new_list = (changes.get("company") or {}).get("contactPersons")
+    old_list = (current.get("company") or {}).get("contactPersons") or []
+    if not (isinstance(new_list, list) and len(new_list) == 1 and len(old_list) == 1
+            and isinstance(new_list[0], dict) and isinstance(old_list[0], dict)):
+        return []
+    new, old = new_list[0], old_list[0]
+    first, last = new.get("firstName"), new.get("lastName")
+    salutation = new.get("salutation")
+    same_salutation = not salutation or fold(str(salutation)) == fold(
+        str(old.get("salutation") or ""))
+    # the same person when every name given matches and the salutation does not
+    # contradict ("Lang" or "Herr Lang" for Herr Peter Lang); another first name
+    # or salutation ("Frau Lang", "Anna Lang") is someone else
+    same = same_salutation and all(
+        not value or fold(str(value)) == fold(str(old.get(key) or ""))
+        for key, value in (("firstName", first), ("lastName", last)))
+    if same:
+        changes["company"]["contactPersons"] = [{**old, **new}]
+        return []
+    # a new person: nothing of the old one (no e-mail, phone or first name)
+    changes["company"]["contactPersons"] = [new]
+    return [f"Lexware erlaubt nur einen Ansprechpartner: {_person_name(old)} wurde durch "
+            f"{_person_name(new, accusative=True)} ersetzt."]
+
+
+def _replaced_contact_data(current: dict[str, Any], changes: dict[str, Any]) -> list[str]:
+    """A new e-mail/phone of a kind replaces the old one (one per kind)."""
+    notes = []
+    for group, what in (("emailAddresses", "E-Mail"), ("phoneNumbers", "Telefonnummer")):
+        new_block = changes.get(group)
+        old_block = current.get(group) or {}
+        if not isinstance(new_block, dict) or not isinstance(old_block, dict):
+            continue
+        for sub, values in new_block.items():
+            old = [str(v) for v in old_block.get(sub) or []]
+            new = [str(v) for v in values or []]
+            gone = [v for v in old if v not in new]
+            if gone and new:
+                notes.append(f"Die bisherige {what} ({sub}) {', '.join(gone)} wurde durch "
+                             f"{', '.join(new)} ersetzt.")
+    return notes
 
 
 _FLAT_ADDRESS = ("street", "zip", "city", "country", "countryCode", "supplement")
 
 
 def _merge_billing(current: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
-    """A partial billing address (flat or as one object) keeps the other fields.
+    """A partial billing or shipping address (flat, as one object or as text
+    "Straße 1, 12345 Ort") keeps the other fields.
 
     Lists are replaced wholesale on update, so {"city": "Köln"} alone would
     drop street, zip and country — merge it onto the current first address.
     """
-    changes = dict(changes)
-    from lxw_cli.core.normalize import _address_keys
+    from lxw_cli.core.normalize import (
+        BILLING_KEYS,
+        SHIPPING_KEYS,
+        address_entry,
+        country_code,
+    )
 
-    for key in ("adresse", "anschrift", "address", "rechnungsadresse"):
-        if isinstance(changes.get(key), dict):
-            changes.update({k: v for k, v in _address_keys(changes.pop(key)).items()})
+    changes = dict(changes)
+    parts: dict[str, dict[str, Any]] = {}
+    for keys, kind in ((BILLING_KEYS, "billing"), (SHIPPING_KEYS, "shipping")):
+        for key in keys:
+            if key in changes and isinstance(changes[key], (dict, str, list)):
+                entry = address_entry(changes.pop(key))
+                if isinstance(entry, dict):
+                    parts[kind] = {**parts.get(kind, {}), **entry}
     addresses_in = changes.get("addresses")
-    if isinstance(addresses_in, dict) and isinstance(addresses_in.get("billing"), (dict, list)):
-        billing_in = addresses_in["billing"]
-        if isinstance(billing_in, dict):
-            billing_in = [billing_in]
-        changes["addresses"] = {**addresses_in, "billing": [
-            _address_keys(b) if isinstance(b, dict) else b for b in billing_in]}
+    if isinstance(addresses_in, list):
+        addresses_in = {"billing": addresses_in}
+    if isinstance(addresses_in, dict):
+        addresses_in = dict(addresses_in)
+        for kind in ("billing", "shipping"):
+            if isinstance(addresses_in.get(kind), (dict, list, str)):
+                entry = address_entry(addresses_in[kind])
+                if isinstance(entry, dict):
+                    addresses_in.pop(kind)
+                    parts[kind] = {**parts.get(kind, {}), **entry}
     for german, key in (("strasse", "street"), ("straße", "street"), ("plz", "zip"),
                         ("postleitzahl", "zip"), ("ort", "city"), ("stadt", "city"),
                         ("land", "country"), ("adresszusatz", "supplement")):
         if german in changes and key not in changes:
             changes[key] = changes.pop(german)
     flat = {k: changes[k] for k in _FLAT_ADDRESS if k in changes}
-    addresses = changes.get("addresses")
-    billing = addresses.get("billing") if isinstance(addresses, dict) else None
-    if isinstance(billing, list) and len(billing) == 1 and isinstance(billing[0], dict):
-        billing = billing[0]
-    if not flat and not isinstance(billing, dict):
+    if flat:
+        parts["billing"] = {**parts.get("billing", {}), **flat}
+    if not parts:
         return changes
     current_addresses = current.get("addresses") or {}
-    base = (current_addresses.get("billing") or [{}])[0]
-    part = {**(billing if isinstance(billing, dict) else {}), **flat}
-    if "country" in part:
-        part["countryCode"] = part.pop("country")
-    if part.get("countryCode"):
-        from lxw_cli.core.normalize import country_code
-
-        part["countryCode"] = country_code(part["countryCode"])
     out = {k: v for k, v in changes.items() if k not in _FLAT_ADDRESS}
-    out["addresses"] = {
-        **(addresses if isinstance(addresses, dict) else {}),
-        "billing": [{**base, **part}],
-    }
+    merged_addresses = dict(addresses_in) if isinstance(addresses_in, dict) else {}
+    for kind, part in parts.items():
+        part = dict(part)
+        if "country" in part:
+            part["countryCode"] = part.pop("country")
+        if part.get("countryCode"):
+            part["countryCode"] = country_code(part["countryCode"])
+        have = current_addresses.get(kind) or []
+        base = have[0] if have and isinstance(have[0], dict) else {}
+        if not base and kind == "shipping":
+            part.setdefault("countryCode", _billing(current).get("countryCode") or "DE")
+        merged_addresses[kind] = [{**base, **part}]
+    out["addresses"] = merged_addresses
     return out
 
 
@@ -3289,7 +4408,34 @@ def get_article(client: LexwareClient, identifier: str) -> dict[str, Any]:
     return _get_or_404(client, f"/v1/articles/{article_id}", "Artikel")
 
 
+def _price_change_check(changes: Any, current: Any) -> None:
+    """"+5%" / "10 % mehr" as a price: a change, never silently a price of 5 €."""
+    from lxw_cli.core.normalize import is_change
+
+    if not isinstance(changes, dict):
+        return
+    price = changes.get("price", changes.get("preis"))
+    values = dict(price) if isinstance(price, dict) else (
+        {"netPrice": price} if price is not None else {})
+    for key in ("netPrice", "grossPrice", "netto", "brutto", "nettopreis", "bruttopreis"):
+        if key in changes:
+            values[key] = changes[key]
+    now = current.get("price") if isinstance(current, dict) else None
+    for key, value in values.items():
+        if isinstance(value, str) and (is_change(value) or "%" in value):
+            side = "grossPrice" if "gross" in key or "brutto" in key else "netPrice"
+            have = (now or {}).get(side) if isinstance(now, dict) else None
+            current_text = (f" (aktuell {have:.2f} €)".replace(".", ",")
+                            if isinstance(have, (int, float)) else "")
+            raise LexwareError(
+                f"Preis '{value}' ist eine Änderung, kein Preis – bitte den neuen Preis "
+                f"angeben{current_text}."
+            )
+
+
 def create_article(client: LexwareClient, body: dict[str, Any]) -> dict[str, Any]:
+    body = unwrap(body, "body", "article", "artikel")
+    _price_change_check(body, None)
     body = normalize_article(body, article_type_map=_ARTICLE_TYPES)
     _check_price_consistency(body.get("price"), None)
     if isinstance(body.get("price"), dict) and "taxRate" not in body["price"]:
@@ -3322,6 +4468,8 @@ def update_article(
                 "nichts geändert."
             )
         changes = {k: v for k, v in changes.items() if k != "archived"}
+    changes = unwrap(changes, "changes")
+    _price_change_check(changes, current)
     changes = normalize_article(changes, article_type_map=_ARTICLE_TYPES)
     _drop_echoed_price(changes.get("price"), current.get("price"))
     _check_price_consistency(changes.get("price"), current.get("price"))

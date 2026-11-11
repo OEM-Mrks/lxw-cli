@@ -325,5 +325,6 @@ def test_issue_list_errors_are_readable(client: LexwareClient) -> None:
         client.post("/v1/vouchers", {})
     msg = str(exc.value)
     assert "Dateityp nicht akzeptiert" in msg
-    assert "voucherItems[0].categoryId" in msg
+    # 0.9.15: 0-based index as the position number people see
+    assert "Position 1 (categoryId)" in msg
     assert "IssueList" not in msg

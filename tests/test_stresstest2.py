@@ -102,8 +102,9 @@ def test_article_line_keeps_empty_description_and_delivery_note_has_no_price(
         "description": "Langtext", "price": {"netPrice": 65, "taxRate": 19}}))
     out = prepare_document(client, {"lineItems": [{"id": U1, "description": ""}]}, INVOICE)
     assert out["lineItems"][0]["description"] == ""
+    # 0.9.15: Lexware needs the price on article positions of a delivery note too
     out = prepare_document(client, {"lineItems": [{"id": U1, "quantity": 2}]}, DELIVERY_NOTE)
-    assert "unitPrice" not in out["lineItems"][0]
+    assert out["lineItems"][0]["unitPrice"]["netAmount"] == 65
 
 
 def test_skonto_label_and_english() -> None:
@@ -355,7 +356,9 @@ def test_days_with_tagen_and_text_label() -> None:
     assert out["paymentConditions"]["paymentTermDuration"] == 30
     out = prepare_document(None, {"paymentConditions": "Zahlung per Vorkasse",
                                   "lineItems": [LINE]}, INVOICE)
-    assert out["paymentConditions"] == {"paymentTermLabel": "Zahlung per Vorkasse"}
+    # 0.9.15: Lexware needs a duration next to the label; Vorkasse = due at once
+    assert out["paymentConditions"] == {"paymentTermLabel": "Zahlung per Vorkasse",
+                                        "paymentTermDuration": 0}
     out = prepare_document(None, {"zahlungsziel": "sofort nach Erhalt, spätestens 10 Tagen",
                                   "lineItems": [LINE]}, INVOICE)
     assert out["paymentConditions"]["paymentTermDuration"] == 10

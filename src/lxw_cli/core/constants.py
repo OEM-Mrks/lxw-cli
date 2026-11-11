@@ -3,8 +3,10 @@
 # Default voucher statuses for voucherlist queries (voucherStatus is required).
 # 'overdue' is a derived status that cannot be combined with others on the API
 # side, so it is intentionally excluded from the default — query it explicitly.
+# 'unchecked' (zu prüfen) = bookkeeping vouchers still lacking data; "all"
+# must include them (Stresstest 3).
 DEFAULT_VOUCHER_STATUSES = (
-    "draft,open,paid,paidoff,voided,transferred,sepadebit,accepted,rejected"
+    "draft,open,paid,paidoff,voided,transferred,sepadebit,accepted,rejected,unchecked"
 )
 
 # All voucher types accepted by /v1/voucherlist — used when the caller wants
