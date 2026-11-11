@@ -475,7 +475,9 @@ _NET_MARK_RE = re.compile(r"\b(?:netto|net|ohne\s+abzug|rein\s+netto|without\s+d
 _PAY_CONTEXT_RE = re.compile(
     r"\b(?:zahlbar|zahlungsziel|zahlungsfrist|zahlung\s+(?:innerhalb|binnen|bis)|"
     r"überweis\w*|ueberweis\w*|begleich\w*|bezahl\w*|zu\s+zahlen|fällig\w*|faellig\w*|"
-    r"netto|net|ohne\s+abzug|skonto|payable|payment|pay|due|discount)\b", re.I)
+    r"netto|net|ohne\s+abzug|skonto|payable|payment|pay|due|discount|"
+    r"ziel|frist|zahlung|rechnungsbetrag|rechnungsdatum|rechnungserhalt|rechnungseingang)\b",
+    re.I)
 # The bare "sofort" texts that may be rebuilt from a given term.
 _BARE_ZERO_RE = re.compile(r"(?:vorkasse|sofort|zahlbar sofort(?:,? rein netto)?)\.?", re.I)
 
@@ -1012,6 +1014,9 @@ def _payment(
                 notes.append(f"Das Skonto im Zahlungstext „{label}“ wurde nicht als "
                              "Skonto-Bedingung übernommen – dafür skonto angeben (z. B. "
                              "„2 % 7 Tage“).")
+    if kind == "own" and is_copy and label and _DATE_IN_TEXT_RE.search(label):
+        notes.append(f"Hinweis: Der übernommene Zahlungstext „{label}“ nennt ein Datum des "
+                     "alten Belegs – bitte prüfen, ob es noch stimmt.")
     if kind == "standard" and until and is_copy and days is not None:
         # "Zahlbar bis <Datum>" of the document that was read: the date is old
         regenerate = True
@@ -1425,6 +1430,9 @@ for _key, _words in (
         _UNIT_SAME[_w] = _key
 
 
+_UMLAUT_PLAIN = str.maketrans({"ä": "a", "ö": "o", "ü": "u"})
+
+
 def _unit_key(word: Any) -> set[str]:
     """Comparable forms of a unit word: table entry, else singular/plural stems."""
     text = str(word or "").strip().casefold().rstrip(".")
@@ -1434,6 +1442,8 @@ def _unit_key(word: Any) -> set[str]:
     for ending in ("en", "es", "er", "n", "s", "e"):
         if text.endswith(ending) and len(text) - len(ending) >= 3:
             forms.add(text[: -len(ending)])
+    # Umlaut plurals: "Bögen" ~ "Bogen", "Sätze" ~ "Satz".
+    forms |= {f.translate(_UMLAUT_PLAIN) for f in forms}
     return forms
 
 

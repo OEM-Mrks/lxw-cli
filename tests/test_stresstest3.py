@@ -1376,3 +1376,55 @@ def test_review2_n6_unit_word_must_fit(client: LexwareClient) -> None:
                       ("1 Pauschale", "pauschal"), ("2 Pakete", "Paket"), ("3 Tage", "Tag")):
         assert line(qty, unit)["unitName"] == unit
     assert line("1000 Etiketten")["unitName"] == "Etiketten"
+
+
+def test_review3_la_terms_without_payment_word() -> None:
+    for label in ("Ziel: 14 Tage", "Zahlung: 14 Tage", "Frist: 14 Tage",
+                  "Innerhalb von 14 Tagen nach Rechnungsdatum.",
+                  "Rechnungsbetrag innerhalb von 14 Tagen."):
+        out = _pay({"paymentConditions": {"paymentTermLabel": label}})
+        assert out["paymentConditions"]["paymentTermDuration"] == 14, label
+        with pytest.raises(LexwareError, match="nennt 14 Tage, die Frist ist 30"):
+            _pay({"paymentConditions": {"paymentTermLabel": label, "paymentTermDuration": 30}})
+    out = _pay({"paymentConditions": {"paymentTermLabel": "Reklamationen innerhalb von 8 Tagen.",
+                                      "paymentTermDuration": 14}})
+    assert out["paymentConditions"]["paymentTermDuration"] == 14
+
+
+@respx.mock
+def test_review3_lb_other_legal_form_is_not_the_same(client: LexwareClient) -> None:
+    gmbh = {**CONTACT, "id": U3, "company": {"name": "Müller GmbH"}}
+    respx.get(f"{API}/contacts/{U3}").mock(return_value=ok(gmbh))
+    post = respx.post(f"{API}/invoices").mock(return_value=ok({"id": U4}))
+    respx.get(f"{API}/invoices/{U4}").mock(return_value=ok({}))
+    for name in ("Müller AG", "Müller UG (haftungsbeschränkt)"):
+        with pytest.raises(LexwareError, match="passt nicht zum Kontakt Müller GmbH"):
+            services.create_invoice(client, {"address": {"contactId": U3, "name": name},
+                                             "lineItems": [LINE]})
+    for name in ("Müller", "Müller GmbH", "müller gmbh"):
+        services.create_invoice(client, {"address": {"contactId": U3, "name": name},
+                                         "lineItems": [LINE]})
+        assert sent(post, post.call_count - 1)["address"]["name"] == "Müller GmbH"
+
+
+def test_review3_lc_umlaut_plural_units() -> None:
+    def line(qty: str, unit: str) -> dict:
+        item = {"name": "A", "preis": 1, "menge": qty, "einheit": unit}
+        return prepare_document(None, {"lineItems": [item]}, INVOICE)["lineItems"][0]
+
+    assert line("500 Bögen", "Bogen")["quantity"] == 500
+    assert line("2 Sätze", "Satz")["quantity"] == 2
+    with pytest.raises(LexwareError, match="in 'Bogen' geführt"):
+        line("3 Rollen", "Bogen")
+
+
+def test_review3_ld_copy_with_dated_own_text_gets_hint() -> None:
+    label = "2 % Skonto bei Zahlung bis 08.10.2026, zahlbar bis 31.10.2026 ohne Abzug"
+    out = prepare_document(None, {"id": U1, "createdDate": "2026-10-01T10:00:00.000+02:00",
+                                  "voucherDate": "2026-10-01T00:00:00.000+02:00",
+                                  "address": {"name": "Kunde", "countryCode": "DE"},
+                                  "lineItems": [LINE], "paymentConditions": {
+                                      "paymentTermLabel": label, "paymentTermDuration": 30}},
+                           INVOICE)
+    assert out["paymentConditions"]["paymentTermLabel"] == label
+    assert "nennt ein Datum des alten Belegs" in out["__hinweis"]

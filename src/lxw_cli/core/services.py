@@ -867,6 +867,12 @@ def _same_name(given: str, label: str) -> bool:
         return True
     short = _loose(_LEGAL_FORM_RE.sub("", label.strip()))
     plain = _loose(_LEGAL_FORM_RE.sub("", given.strip()))
+    given_form = _LEGAL_FORM_RE.search(given.strip())
+    if given_form:
+        # "Müller AG" is not "Müller GmbH": a stated legal form must match.
+        label_form = _LEGAL_FORM_RE.search(label.strip())
+        if not label_form or _loose(given_form.group(0)) != _loose(label_form.group(0)):
+            return False
     return bool(short) and bool(plain) and plain == short
 
 
