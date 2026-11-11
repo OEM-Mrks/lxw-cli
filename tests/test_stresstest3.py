@@ -111,15 +111,18 @@ def test_gross_word_in_price_on_net_document() -> None:
             "grossAmount": "10 netto"}}]}, INVOICE)
 
 
-def test_number_formats_still_work_and_1_000_is_ambiguous() -> None:
+def test_number_formats_still_work() -> None:
     for text, value in (("1.234,56", "1234.56"), ("12,-", "12"), ("EUR 5", "5"),
                         ("119,00 €", "119.00"), ("１２", "12"), ("1 000", "1000"),
                         ("5 Euro", "5"), ("0,500", "0.500")):
         assert str(to_decimal(text, field="x", kind="money")) == value
     assert int(to_decimal("2e3", field="x")) == 2000
-    for text in ("1,000", "12,345"):
-        with pytest.raises(LexwareError, match="mehrdeutig"):
-            to_decimal(text, field="x")
+    # Review M3: the comma is the German decimal comma again (as in 0.9.14)
+    for text, value in (("1,000", "1.000"), ("12,345", "12.345"), ("2,500", "2.500"),
+                        ("1,125", "1.125")):
+        assert str(to_decimal(text, field="x")) == value
+    with pytest.raises(LexwareError, match="mehrdeutig"):
+        to_decimal("1.500", field="x")
 
 
 @respx.mock
@@ -169,16 +172,15 @@ def test_payment_label_only_and_net_words() -> None:
 
 
 def test_unclear_or_contradicting_terms_raise() -> None:
-    for text in ("2 % Skonto", "Skonto nach Absprache, 30 Tage", "14 oder 30 Tage"):
+    for text in ("2 % Skonto", "Skonto nach Absprache, 30 Tage", "14 Tage oder 30 Tage"):
         with pytest.raises(LexwareError):
             prepare_document(None, {"zahlungsziel": text, "lineItems": [LINE]}, INVOICE)
     with pytest.raises(LexwareError, match="Widersprüchliche Zahlungsfristen"):
         prepare_document(None, {"zahlungsziel": 14, "paymentConditions": {
-            "paymentTermLabel": "Zahlbar innerhalb von 30 Tagen"}, "lineItems": [LINE]},
-            INVOICE)
-    with pytest.raises(LexwareError, match="keine Frist"):
-        prepare_document(None, {"paymentConditions": "nach Vereinbarung",
-                                "lineItems": [LINE]}, INVOICE)
+            "paymentTermLabel": "Bitte innerhalb von 30 Tagen auf IBAN DE12 überweisen"},
+            "lineItems": [LINE]}, INVOICE)
+    with pytest.raises(LexwareError, match="fehlt die Zahlungsfrist"):
+        prepare_document(None, {"skonto": "2 % 7 Tage", "lineItems": [LINE]}, INVOICE)
 
 
 INV = {"id": U1, "voucherNumber": "RE0005", "voucherStatus": "open",
@@ -299,8 +301,9 @@ def test_address_as_text(client: LexwareClient) -> None:
     body = normalize_contact({"firma": "A GmbH", "adresse": "Westfalendamm 10, 44141 Dortmund"})
     assert body["addresses"]["billing"] == [
         {"street": "Westfalendamm 10", "zip": "44141", "city": "Dortmund", "countryCode": "DE"}]
-    with pytest.raises(LexwareError, match="Straße Nr, PLZ Ort"):
-        normalize_contact({"firma": "A GmbH", "adresse": "irgendwo in Dortmund"})
+    # Review L1: a text without a postcode stays the street (as in 0.9.14)
+    assert normalize_contact({"firma": "A GmbH", "adresse": "Weg 1"})["addresses"][
+        "billing"] == [{"street": "Weg 1"}]
     put = _contact_routes()
     services.update_contact(client, U2, {"adresse": "Graben 1, 1010 Wien, Österreich"})
     assert sent(put)["addresses"]["billing"][0] == {"street": "Graben 1", "zip": "1010",
@@ -517,10 +520,12 @@ def test_second_delivery_note_via_the_quotation(client: LexwareClient) -> None:
     respx.get(f"{API}/delivery-notes/ls").mock(return_value=ok({
         "id": "ls", "voucherStatus": "open", "createdDate": "2026-11-02T10:00:00.000+01:00",
         "relatedVouchers": [{"id": "ag", "voucherType": "quotation"}]}))
-    post = respx.post(f"{API}/delivery-notes")
-    with pytest.raises(LexwareError, match="LS0037"):
-        services.continue_document(client, "RE0040", "Lieferschein")
-    assert not post.called
+    # Review M6: found only via the predecessor → a hint (partial delivery?), no block
+    post = _target("delivery-notes")
+    result = services.continue_document(client, "RE0040", "Lieferschein")
+    assert post.called
+    assert "Lieferschein LS0037 (zu AG0040)" in result["hinweis"]
+    assert "Teillieferung" in result["hinweis"]
 
 
 CREDITED = {**INV, "relatedVouchers": [
@@ -793,7 +798,10 @@ def test_boolean_words() -> None:
 
 
 def test_quotation_texts_dropped_on_invoice() -> None:
-    out = prepare_document(None, {"title": "Angebot", "introduction": "Gerne bieten wir Ihnen "
+    # Review S3: only in a COPY of a document that was read
+    out = prepare_document(None, {"id": U1, "createdDate": "2026-11-01T10:00:00.000+01:00",
+                                  "voucherDate": "2026-11-01T00:00:00.000+01:00",
+                                  "title": "Angebot", "introduction": "Gerne bieten wir Ihnen "
                                   "an:", "remark": "Danke!", "lineItems": [LINE]}, INVOICE)
     assert "title" not in out and "introduction" not in out and out["remark"] == "Danke!"
     assert "anderen Belegart" in out["__hinweis"]
@@ -848,9 +856,10 @@ def test_generic_credit_note_and_category_search(client: LexwareClient) -> None:
 
 
 def test_voucher_paid_status_and_category_on_items() -> None:
-    with pytest.raises(LexwareError, match="nicht als bezahlt"):
-        prepare_voucher({"type": "Quittung", "voucherNumber": "1", "betrag": 5,
-                         "kategorie": "x", "voucherStatus": "bezahlt"})
+    # Review L3: the status is dropped with a hint (Lexware sets it itself)
+    out = prepare_voucher({"type": "Quittung", "voucherNumber": "1", "betrag": 5,
+                           "kategorie": "x", "voucherStatus": "bezahlt"})
+    assert "voucherStatus" not in out and "nicht übernommen" in out["__hinweis"]
     out = prepare_voucher({"type": "Eingangsrechnung", "voucherNumber": "1",
                            "kategorie": "Bürobedarf", "taxType": "gross", "voucherItems": [
                                {"amount": 119, "taxRatePercent": 19},
@@ -986,3 +995,242 @@ def test_dunning_searches_outgoing_invoices_first(client: LexwareClient) -> None
     assert post.calls[0].request.url.params["precedingSalesVoucherId"] == U4
     with pytest.raises(LexwareError, match="AG0001 ist ein Angebot"):
         services.create_dunning(client, "AG0001")
+
+
+# == Review-Befunde zu 0.9.15 ===============================================================
+
+
+def _pay(extra: dict, kind: str = INVOICE) -> dict:
+    out = prepare_document(None, {"voucherDate": "2026-11-11", "address": {"name": "X"},
+                                  "lineItems": [LINE], **extra}, kind)
+    return out
+
+
+def test_review_s1_own_text_is_never_standard() -> None:
+    from lxw_cli.core.prepare import is_standard_label
+
+    own = "Payable by bank transfer within 30 days to IBAN DE12 3456 7890."
+    for lang in ("en", "de"):
+        out = _pay({"language": lang, "paymentConditions": {"paymentTermLabel": own,
+                                                            "paymentTermDuration": 30}})
+        assert out["paymentConditions"]["paymentTermLabel"] == own
+    assert not is_standard_label(own)
+    assert not is_standard_label("Zahlbar innerhalb von 30 Tagen ohne Abzug. Bitte "
+                                 "Kundennummer angeben.")
+    for label in ("Zahlbar sofort, rein netto", "Zahlbar innerhalb von 14 Tagen ohne Abzug",
+                  "Zahlbar innerhalb von 30 Tagen. Bei Zahlung innerhalb von 10 Tagen 2,5 % "
+                  "Skonto.", "Payable within 14 days without deduction.",
+                  "Payable within 30 days. 2 % discount if paid within 10 days."):
+        assert is_standard_label(label)
+
+
+@respx.mock
+def test_review_s2_contact_person_only_merged_when_same(client: LexwareClient) -> None:
+    current = {**CONTACT, "company": {"name": "Lang GmbH", "contactPersons": [
+        {"salutation": "Herr", "firstName": "Peter", "lastName": "Lang", "primary": True,
+         "emailAddress": "peter@lang.de", "phoneNumber": "0231 1"}]}}
+    put = _contact_routes(current)
+    for index, change in enumerate(("Frau Lang", {"nachname": "Lang", "anrede": "Frau"},
+                                    "Anna Lang", {"nachname": "Meier"})):
+        result = services.update_contact(client, U2, {"ansprechpartner": change})
+        person = sent(put, index)["company"]["contactPersons"][0]
+        assert "emailAddress" not in person and "phoneNumber" not in person
+        assert person.get("firstName") != "Peter"
+        assert "wurde durch" in result["hinweis"]
+    services.update_contact(client, U2, {"ansprechpartner": "Peter Lang"})
+    person = sent(put, 4)["company"]["contactPersons"][0]
+    assert person["emailAddress"] == "peter@lang.de" and person["salutation"] == "Herr"
+
+
+def test_review_s3_own_texts_are_kept() -> None:
+    for kind, key, text in ((INVOICE, "remark", "Vielen Dank für Ihren Auftrag."),
+                            (QUOTATION, "remark", "Wir freuen uns auf eine gute "
+                                                  "Zusammenarbeit."),
+                            (INVOICE, "title", "Lieferschein")):
+        out = _pay({key: text}, kind)
+        assert out[key] == text
+
+
+@respx.mock
+def test_review_s4_own_price_takes_the_article_rate(client: LexwareClient) -> None:
+    book = {**ARTICLE, "price": {"netPrice": 18.69, "grossPrice": 20, "taxRate": 7}}
+    respx.get(f"{API}/articles/{U1}").mock(return_value=ok(book))
+    out = prepare_document(client, {"lineItems": [{"id": U1, "unitPrice": {"netAmount": 15}}]},
+                           INVOICE)
+    assert out["lineItems"][0]["unitPrice"]["taxRatePercentage"] == 7
+    out = prepare_document(client, {"taxConditions": "vatfree", "lineItems": [
+        {"id": U1, "unitPrice": {"netAmount": 15}}]}, INVOICE)
+    assert out["lineItems"][0]["unitPrice"]["taxRatePercentage"] == 0
+
+
+def test_review_m1_companies_are_not_asked_back() -> None:
+    for name in ("Müller Weber", "Coal Control", "Floor Tek", "Print Paul", "Jäger Direkt",
+                 "Elektro Meier", "Schreinerei Holz", "Stadtwerke Köln", "Lagemann Etiketten",
+                 "Ophelia Invoice", "Zahnarztpraxis Dr. Lang"):
+        assert normalize_contact({"name": name})["company"]["name"] == name
+    for name in ("Peter Lang", "Lang, Peter", "Claire Dubois"):
+        with pytest.raises(LexwareError, match="Firma oder eine Privatperson"):
+            normalize_contact({"name": name})
+    assert normalize_contact({"name": "Dr. Peter Lang"})["person"]["lastName"] == "Lang"
+    assert normalize_contact({"name": "Lang, Peter", "typ": "privat"})["person"] == {
+        "lastName": "Lang", "firstName": "Peter"}
+
+
+@respx.mock
+def test_review_m2_any_single_unit_word(client: LexwareClient) -> None:
+    def line(qty: str, **extra: object) -> dict:
+        return prepare_document(None, {"lineItems": [{"name": "Etiketten", "preis": 1,
+                                                      "menge": qty, **extra}]},
+                                INVOICE)["lineItems"][0]
+
+    assert line("5 Rollen")["unitName"] == "Rollen"
+    assert line("1000 Etiketten", einheit="Etikett")["quantity"] == 1000
+    assert line("10 Kartons", einheit="Karton")["unitName"] == "Karton"
+    assert line("10 Stück", einheit="Rolle")["quantity"] == 10
+    assert line("3 Std.", einheit="h")["quantity"] == 3
+    with pytest.raises(LexwareError, match="passt nicht zur Einheit"):
+        line("500 g", einheit="kg")
+    for bad in ("10 % mehr", "+5 Rollen"):
+        with pytest.raises(LexwareError):
+            line(bad)
+    # article position: checked against the article's unit, after completion
+    respx.get(f"{API}/articles/{U1}").mock(return_value=ok({**ARTICLE, "unitName": "Stunde"}))
+    with pytest.raises(LexwareError, match=r"\(Stunde\)"):
+        prepare_document(client, {"lineItems": [{"id": U1, "menge": "30 min"}]}, INVOICE)
+    out = prepare_document(client, {"lineItems": [{"id": U1, "menge": "2 Std"}]}, INVOICE)
+    assert out["lineItems"][0]["quantity"] == 2
+
+
+def test_review_m3_comma_is_decimal() -> None:
+    out = prepare_document(None, {"lineItems": [{"name": "A", "preis": "1,125",
+                                                 "menge": "2,500"}]}, INVOICE)
+    assert out["lineItems"][0]["unitPrice"]["netAmount"] == 1.125
+    assert out["lineItems"][0]["quantity"] == 2.5
+
+
+def test_review_m4_rate_with_word() -> None:
+    from lxw_cli.core.normalize import normalize_article
+
+    for text, rate in (("19% MwSt", 19), ("19 % USt.", 19), ("7% MwSt.", 7),
+                       ("19 % VAT", 19), ("7 % Mehrwertsteuer", 7)):
+        out = prepare_document(None, {"lineItems": [{"name": "A", "preis": 1,
+                                                     "steuersatz": text}]}, INVOICE)
+        assert out["lineItems"][0]["unitPrice"]["taxRatePercentage"] == rate
+        voucher = prepare_voucher({"type": "Quittung", "voucherNumber": "1", "betrag": 10,
+                                   "kategorie": "x", "mwst": text})
+        assert voucher["voucherItems"][0]["taxRatePercent"] == rate
+        article = normalize_article({"title": "A", "netPrice": 1, "taxRate": text},
+                                    article_type_map={})
+        assert article["price"]["taxRate"] == rate
+
+
+def test_review_m5_terms_of_copies_and_standard_texts() -> None:
+    copy_of = {"id": "abc", "createdDate": "2026-10-01T10:00:00.000+02:00",
+               "voucherDate": "2026-10-01T00:00:00.000+02:00"}
+    out = _pay({**copy_of, "paymentConditions": {
+        "paymentTermLabel": "Zahlbar bis 15.10.2026 ohne Abzug",
+        "paymentTermLabelTemplate": "Zahlbar bis {dueDate} ohne Abzug",
+        "paymentTermDuration": 14}})
+    cond = out["paymentConditions"]
+    assert cond["paymentTermLabel"] == "Zahlbar innerhalb von 14 Tagen ohne Abzug"
+    assert "paymentTermLabelTemplate" not in cond and "alten Belegs" in out["__hinweis"]
+    out = _pay({"zahlungsziel": 14, "paymentConditions": "Vorkasse"})
+    assert out["paymentConditions"]["paymentTermLabel"] == (
+        "Zahlbar innerhalb von 14 Tagen ohne Abzug")
+    assert "neu gebildet" in out["__hinweis"]
+    out = _pay({"paymentConditions": {"paymentTermLabel": "Zahlbar innerhalb von 14 Tagen "
+                                      "ohne Abzug", "paymentTermDuration": 30}})
+    assert out["paymentConditions"]["paymentTermLabel"] == (
+        "Zahlbar innerhalb von 30 Tagen ohne Abzug")
+    with pytest.raises(LexwareError, match="Widersprüchliche Zahlungsfristen"):
+        _pay({"paymentConditions": {"paymentTermLabel": "Rechnungsbetrag bitte innerhalb "
+                                    "von 10 Tagen überweisen", "paymentTermDuration": 14}})
+
+
+@respx.mock
+def test_review_m6_partial_delivery_via_chain_is_a_hint(client: LexwareClient) -> None:
+    order = {**INV, "id": U1, "voucherNumber": "AB0001",
+             "createdDate": "2026-11-01T10:00:00.000+01:00", "relatedVouchers": [
+                 {"id": "ls1", "voucherNumber": "LS0001", "voucherType": "deliverynote"},
+                 {"id": U4, "voucherNumber": "LS0002", "voucherType": "deliverynote"},
+                 {"id": "re1", "voucherNumber": "RE0001", "voucherType": "invoice"}]}
+    partial = {**INV, "id": U4, "voucherNumber": "LS0002",
+               "createdDate": "2026-11-05T10:00:00.000+01:00",
+               "relatedVouchers": [{"id": U1, "voucherNumber": "AB0001",
+                                    "voucherType": "orderconfirmation"}]}
+    _source(partial, "deliverynote", "delivery-notes")
+    respx.get(f"{API}/order-confirmations/{U1}").mock(return_value=ok(order))
+    respx.get(f"{API}/invoices/re1").mock(return_value=ok({
+        "voucherStatus": "open", "createdDate": "2026-11-03T10:00:00.000+01:00",
+        "relatedVouchers": [{"id": "ls1"}, {"id": U1}]}))
+    post = _target("invoices")
+    result = services.continue_document(client, "LS0002", "Rechnung")
+    assert post.called
+    assert "Rechnung RE0001 (zu AB0001)" in result["hinweis"]
+    assert "Teilrechnung" in result["hinweis"]
+
+
+def test_review_m7_free_texts() -> None:
+    for label in ("Zahlbar nach Erhalt", "bei Erhalt", "Zahlbar nach Rechnungserhalt"):
+        assert _pay({"paymentConditions": label})["paymentConditions"][
+            "paymentTermDuration"] == 0
+    for label in ("Lastschrift", "PayPal", "nach Vereinbarung", "Bar bezahlt",
+                  "50 % bei Auftrag, 50 % bei Lieferung"):
+        assert _pay({"paymentConditions": label})["paymentConditions"] == {
+            "paymentTermLabel": label}  # as in 0.9.14
+    for label, days in (("Zahlbar innerhalb von 7 Tagen, danach Verzugszinsen 9 % über "
+                         "Basiszins.", 7),
+                        ("Zahlbar ohne Abzug innerhalb von 14 Tagen. Bei Zahlungsverzug "
+                         "berechnen wir 5 Euro Mahngebühr.", 14),
+                        ("Zahlbar innerhalb 14 Tagen, Kd.-Nr. 10023", 14)):
+        cond = _pay({"paymentConditions": label})["paymentConditions"]
+        assert cond == {"paymentTermLabel": label, "paymentTermDuration": days}
+
+
+def test_review_l1_address_text_variants() -> None:
+    from lxw_cli.core.normalize import parse_address_text as parse
+
+    assert parse("Weg 1") == {"street": "Weg 1"}
+    assert parse("c/o Müller, Weg 1, 50667 Köln")["supplement"] == "c/o Müller"
+    assert parse("A-1010 Wien, Ring 1") == {"street": "Ring 1", "zip": "1010", "city": "Wien",
+                                            "countryCode": "AT"}
+    assert parse("Ring 1, 1234 AB Amsterdam") == {"street": "Ring 1", "zip": "1234 AB",
+                                                  "city": "Amsterdam", "countryCode": "NL"}
+    assert parse("Musterweg 3, 50667 Köln (Hinterhof)") == {
+        "supplement": "Hinterhof", "street": "Musterweg 3", "zip": "50667", "city": "Köln",
+        "countryCode": "DE"}
+
+
+@respx.mock
+def test_review_l2_skonto_without_any_term(client: LexwareClient) -> None:
+    _source({**INV, "paymentConditions": None})
+    with pytest.raises(LexwareError, match="Bitte auch zahlungsziel"):
+        services.continue_document(client, "RE0005", "Rechnungskorrektur",
+                                   changes={"skonto": "2 % 7 Tage"})
+
+
+def test_review_l3_voucher_net_and_gross() -> None:
+    base = {"type": "Eingangsrechnung", "voucherNumber": "4711", "voucherDate": "05.11.2026"}
+    out = prepare_voucher({**base, "voucherItems": [{"netto": 100, "brutto": 119,
+                                                     "steuersatz": 19, "kategorie": "x"}]})
+    assert out["taxType"] == "gross" and out["voucherItems"][0]["amount"] == 119
+    out = prepare_voucher({**base, "taxType": "net", "voucherItems": [
+        {"netto": 100, "brutto": 119, "steuersatz": 19, "kategorie": "x"}]})
+    assert out["voucherItems"][0]["amount"] == 100
+    with pytest.raises(LexwareError, match="passen bei 19 % nicht"):
+        prepare_voucher({**base, "voucherItems": [{"netto": 100, "brutto": 130,
+                                                   "steuersatz": 19, "kategorie": "x"}]})
+    out = prepare_voucher({**base, "taxType": "gross", "voucherStatus": "paid",
+                           "voucherItems": [{"amount": 119, "taxRatePercent": 19,
+                                             "categoryId": "x"}]})
+    assert "voucherStatus" not in out and "paid" in out["__hinweis"]
+
+
+def test_review_l4_tax_type_words() -> None:
+    for word, kind in (("Nettopreise", "net"), ("netto (19%)", "net"), ("inkl. MwSt", "gross"),
+                       ("Brutto inkl. USt", "gross"), ("zzgl. MwSt", "net")):
+        out = _pay({"steuerart": word})
+        assert out["taxConditions"]["taxType"] == kind
+        assert out["lineItems"][0]["unitPrice"]["taxRatePercentage"] == 19
+    with pytest.raises(LexwareError, match="Unbekannte Steuerart 'Sonderregel'"):
+        _pay({"steuerart": "Sonderregel"})

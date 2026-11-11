@@ -1262,8 +1262,10 @@ def create_invoice_draft(body: dict[str, Any]) -> dict[str, Any]:
     `material`/`service` only with the article's `id`.
     Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
     steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
-    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
-    text ("+5%", "30 min") is refused instead of guessed.
+    steuersatz "ermäßigt" (7) / "voll" (19) / "19% MwSt". A quantity may carry
+    its unit ("5 Rollen", "2 Std"); a change ("+5%", "10 % mehr") or a unit that
+    contradicts the position's ("30 min" on hours) is refused, not guessed. An
+    own payment text is kept as written; only standard texts are rebuilt.
     """
     return services.create_invoice(_client_get(), body)
 
@@ -1636,8 +1638,10 @@ def create_quotation_draft(body: dict[str, Any]) -> dict[str, Any]:
     `material`/`service` only with the article's `id`.
     Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
     steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
-    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
-    text ("+5%", "30 min") is refused instead of guessed.
+    steuersatz "ermäßigt" (7) / "voll" (19) / "19% MwSt". A quantity may carry
+    its unit ("5 Rollen", "2 Std"); a change ("+5%", "10 % mehr") or a unit that
+    contradicts the position's ("30 min" on hours) is refused, not guessed. An
+    own payment text is kept as written; only standard texts are rebuilt.
     """
     return services.create_quotation(_client_get(), body)
 
@@ -1662,8 +1666,10 @@ def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
     `material`/`service` only with the article's `id`.
     Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
     steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
-    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
-    text ("+5%", "30 min") is refused instead of guessed.
+    steuersatz "ermäßigt" (7) / "voll" (19) / "19% MwSt". A quantity may carry
+    its unit ("5 Rollen", "2 Std"); a change ("+5%", "10 % mehr") or a unit that
+    contradicts the position's ("30 min" on hours) is refused, not guessed. An
+    own payment text is kept as written; only standard texts are rebuilt.
     """
     return services.create_order_confirmation(_client_get(), body)
 
@@ -1753,8 +1759,10 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
     `material`/`service` only with the article's `id`.
     Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
     steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
-    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
-    text ("+5%", "30 min") is refused instead of guessed.
+    steuersatz "ermäßigt" (7) / "voll" (19) / "19% MwSt". A quantity may carry
+    its unit ("5 Rollen", "2 Std"); a change ("+5%", "10 % mehr") or a unit that
+    contradicts the position's ("30 min" on hours) is refused, not guessed. An
+    own payment text is kept as written; only standard texts are rebuilt.
     """
     return services.create_delivery_note(_client_get(), body)
 

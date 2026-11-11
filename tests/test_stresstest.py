@@ -313,13 +313,10 @@ def test_article_number_as_position_id(client: LexwareClient) -> None:
 
 
 def test_voucher_kind_words() -> None:
-    out = prepare_voucher({"type": "Quittung", "voucherNumber": "Q1", "betrag": "12,3451",
+    out = prepare_voucher({"type": "Quittung", "voucherNumber": "Q1", "betrag": "12,345",
                            "kategorie": "Porto"})
     assert out["type"] == "purchaseinvoice"
     assert out["voucherItems"][0]["amount"] == 12.35
-    with pytest.raises(LexwareError, match="mehrdeutig"):  # 0.9.15: 12,345 = 12345?
-        prepare_voucher({"type": "Quittung", "voucherNumber": "Q1", "betrag": "12,345",
-                         "kategorie": "Porto"})
     with pytest.raises(LexwareError, match="Unbekannte Belegart 'Spende'"):
         prepare_voucher({"type": "Spende", "voucherNumber": "Q1"})
 

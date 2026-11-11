@@ -873,8 +873,10 @@ def _complete_contact_address(
         return
     label = _contact_label(contact)
     name = address.get("name")
-    if check_name and name and fold(str(name)) != fold(label) and _loose(str(name)) != _loose(
-            label):
+    given, have = _loose(str(name or "")), _loose(label)
+    # a short form of the contact's name ("Coal Control" for "Coal Control GmbH &
+    # Co. KG") is the same contact; only a really different name is asked back
+    if check_name and name and given not in have and have not in given:
         raise LexwareError(
             f"Der Name '{name}' passt nicht zum Kontakt {_contact_brief(contact)}. Soll der "
             "Beleg an diesen Kontakt gehen (dann den Namen weglassen) oder an eine "
@@ -2782,7 +2784,11 @@ def continue_document(
             notes.append(f"Zu {number} gibt es bereits Rechnungskorrekturen: "
                          f"{_credit_list(credits)}.")
     elif not allow_duplicate:
-        blocking = _chain_followups(client, source, source_id, target_type)
+        blocking, nearby = _chain_followups(client, source, source_id, target_type)
+        part = "Teillieferung" if target_type == "deliverynote" else "Teilrechnung"
+        for other, via in nearby:
+            notes.append(f"In der Belegkette gibt es schon {_DOC_META[target_type]['label']} "
+                         f"{other} (zu {via}) – bitte prüfen, ob das eine {part} ist.")
         if blocking:
             raise LexwareError(
                 f"Zu {number} gibt es in der Belegkette schon: "
@@ -3103,14 +3109,18 @@ def _real_followups(
 
 def _chain_followups(
     client: LexwareClient, source: dict[str, Any], source_id: str, target_type: str
-) -> list[str]:
-    """Follow-ups of the target type next to the source in the chain: the
-    source's own and those of its predecessors (AG → LS0037 and AG → RE:
-    RE → Lieferschein would be a second delivery note). The source's own
-    predecessor (RE made from LS0001) is no duplicate."""
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Follow-ups of the target type next to the source in the chain.
+
+    Returns (direct, indirect): the source's own follow-ups (they block) and
+    those of its predecessors as (number, predecessor number) — e.g. AG →
+    LS0037 and AG → RE: RE → Lieferschein may be a second delivery note, or a
+    partial one; that is only pointed out. The source's own predecessor (RE
+    made from LS0001) is no duplicate at all."""
     found = list(_real_followups(client, source, target_type))
+    indirect: list[tuple[str, str]] = []
     if target_type not in ("deliverynote", "invoice"):
-        return found
+        return found, indirect
     source_created = str(source.get("createdDate") or "")
     for rel in source.get("relatedVouchers") or []:
         if not isinstance(rel, dict) or rel.get("id") == source_id:
@@ -3129,7 +3139,7 @@ def _chain_followups(
                     or str(rel2.get("voucherType", "")).lower() != target_type):
                 continue
             label2 = str(rel2.get("voucherNumber") or rel2.get("id"))
-            if label2 in found:
+            if label2 in found or label2 in (n for n, _ in indirect):
                 continue
             doc2 = _related_doc(client, rel2)
             if doc2 is None or doc2.get("voucherStatus") == "voided":
@@ -3139,8 +3149,8 @@ def _chain_followups(
             if source_id in linked:
                 continue  # in the source's own line (its predecessor), no sibling
             if str(doc2.get("createdDate") or "") >= created:
-                found.append(label2)
-    return found
+                indirect.append((label2, str(rel.get("voucherNumber") or rel.get("id"))))
+    return found, indirect
 
 
 def _existing_followups(source: dict[str, Any], target_type: str) -> list[str]:
@@ -3239,6 +3249,14 @@ def _merge_payment(old: Any, new: dict[str, Any], language: Any, notes: list[str
             and old["paymentDiscountConditions"].get("discountPercentage"))
     duration = merged.get("paymentTermDuration")
     if not isinstance(duration, int):
+        if merged.get("paymentDiscountConditions"):
+            raise LexwareError(
+                "Für das Skonto fehlt die Zahlungsfrist – der Ausgangsbeleg hat keine. Bitte "
+                "auch zahlungsziel in Tagen angeben (z. B. {\"zahlungsziel\": 30, "
+                "\"skonto\": \"2 % 10 Tage\"})."
+            )
+        if "paymentTermLabel" in new and not auto:
+            return merged  # an own text without a term, as given (like on create)
         raise LexwareError(
             "Für die Zahlungsbedingung fehlt die Frist – bitte zahlungsziel in Tagen angeben "
             "(z. B. 14)."
@@ -4094,15 +4112,23 @@ def _merge_contact_person(current: dict[str, Any], changes: dict[str, Any]) -> l
             and isinstance(new_list[0], dict) and isinstance(old_list[0], dict)):
         return []
     new, old = new_list[0], old_list[0]
-    named = new.get("firstName") or new.get("lastName")
-    same = not named or (
-        fold(str(new.get("lastName") or old.get("lastName") or ""))
-        == fold(str(old.get("lastName") or ""))
-        and fold(str(new.get("firstName") or old.get("firstName") or ""))
-        == fold(str(old.get("firstName") or "")))
+    first, last = new.get("firstName"), new.get("lastName")
+    salutation = new.get("salutation")
+    same_salutation = not salutation or fold(str(salutation)) == fold(
+        str(old.get("salutation") or ""))
+    if not first and not last:
+        same = same_salutation  # only contact data (e-mail, phone) changes
+    else:
+        # the same person only when BOTH names are given and equal — "Frau Lang"
+        # or "Anna Lang" next to "Herr Peter Lang" is someone else
+        same = bool(first and last) and same_salutation and fold(str(first)) == fold(
+            str(old.get("firstName") or "")) and fold(str(last)) == fold(
+            str(old.get("lastName") or ""))
     if same:
         changes["company"]["contactPersons"] = [{**old, **new}]
         return []
+    # a new person: nothing of the old one (no e-mail, phone or first name)
+    changes["company"]["contactPersons"] = [new]
     return [f"Lexware erlaubt nur einen Ansprechpartner: {_person_name(old)} wurde durch "
             f"{_person_name(new, accusative=True)} ersetzt."]
 

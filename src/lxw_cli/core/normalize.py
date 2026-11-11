@@ -271,13 +271,7 @@ def to_decimal(value: Any, *, field: str, kind: str = "number") -> Decimal | Non
             text = text.replace(".", "").replace(",", ".")
         else:
             text = text.replace(",", "")
-    elif re.fullmatch(r"[+-]?[1-9]\d{0,2},\d{3}", text):
-        # "1,000" is 1 in German but 1000 in English — never guess
-        raise LexwareError(
-            f"„{field}“: '{value}' ist mehrdeutig (1,000 = eins oder tausend?). Bitte "
-            "eindeutig angeben, z. B. 1 oder 1000 (Dezimalstellen mit Komma: 1,5)."
-        )
-    elif "," in text:
+    elif "," in text:  # German decimal comma ("1,000" = 1, as in 0.9.14)
         text = text.replace(",", ".")
     elif re.fullmatch(r"[+-]?[1-9]\d{0,2}(\.\d{3}){2,}", text):
         text = text.replace(".", "")  # 1.234.567 – German thousands
@@ -371,8 +365,10 @@ def rate_word(value: Any) -> Any:
     """"ermäßigt" → 7, "voll"/"normal"/"regulär" → 19, "steuerfrei" → 0."""
     if not isinstance(value, str):
         return value
-    word = re.sub(r"\b(?:steuersatz|mwst\.?|ust\.?|umsatzsteuer|satz)\b", "",
-                  value.strip().casefold()).strip(" .:")
+    word = re.sub(r"\b(?:steuersatz|mwst|ust|umsatzsteuer|mehrwertsteuer|vat|tax|satz)\b\.?",
+                  "", value.strip().casefold()).strip(" .:")
+    if re.fullmatch(r"\d+(?:[.,]\d+)?\s*%?", word):
+        return word  # "19% MwSt", "7 % USt." → "19%", "7 %"
     word = re.sub(r"(?:e[rsmn]?)$", "", word) if word not in _RATE_WORDS else word
     for key, rate in _RATE_WORDS.items():
         if word == key or word == re.sub(r"(?:e[rsmn]?)$", "", key):
@@ -602,6 +598,13 @@ def _person_from_text(text: str) -> dict[str, Any]:
         word = m.group(1).rstrip(".").lower()
         person["salutation"] = "Herr" if word.startswith("h") else "Frau"
         text = text[m.end():]
+    if text.count(",") == 1:  # "Lang, Peter"
+        last, first = (p.strip() for p in text.split(","))
+        if last:
+            person["lastName"] = last
+        if first:
+            person["firstName"] = first
+        return person
     parts = text.split()
     if parts:
         person["lastName"] = parts[-1]
@@ -622,31 +625,77 @@ SHIPPING_KEYS = ("lieferadresse", "lieferanschrift", "shipping", "shippingAddres
                  "shipping_address")
 
 
+_ZIP_CITY_RE = re.compile(
+    r"^(?:(?P<prefix>[A-Z]{1,2})-)?(?P<zip>\d{4}\s?[A-Z]{2}(?=\s)|\d{4,5})\s+(?P<city>.+)$")
+
+
+def _country_part(text: str) -> str | None:
+    """"Österreich", "AT", "Niederlande" → ISO code; anything else None."""
+    word = text.strip()
+    if word.casefold() in _COUNTRIES:
+        return _COUNTRIES[word.casefold()]
+    if len(word) == 2 and word.isalpha() and word.isupper():
+        return word
+    return None
+
+
 def parse_address_text(text: str) -> dict[str, Any]:
-    """"Westfalendamm 10, 44141 Dortmund[, Land]" → {street, zip, city, countryCode}."""
-    m = _ADDRESS_TEXT_RE.match(str(text))
-    if not m:
-        raise LexwareError(
-            f"Adresse '{text}' nicht lesbar – bitte als „Straße Nr, PLZ Ort“ (z. B. "
-            "„Westfalendamm 10, 44141 Dortmund“) oder getrennt als strasse, plz, ort angeben."
-        )
+    """"Westfalendamm 10, 44141 Dortmund[, Land]" → {street, zip, city, countryCode}.
+
+    Also "A-1010 Wien, Ring 1" (PLZ/Ort first), "c/o …" (→ supplement),
+    "1234 AB Amsterdam" (Dutch postcode), "Köln (Hinterhof)" (→ supplement).
+    A text without a postcode stays the street, as in 0.9.14.
+    """
+    raw = str(text).strip()
+    parts = [p.strip() for p in re.split(r"\s*[,;\n]\s*", raw) if p.strip()]
+    out: dict[str, Any] = {}
+    supplements: list[str] = []
     country = None
-    if m.group("country"):
-        country = country_code(m.group("country"))
-        if not (isinstance(country, str) and len(country) == 2):
-            raise LexwareError(
-                f"Land '{m.group('country')}' in der Adresse '{text}' unbekannt – bitte als "
-                "ISO-Code (z. B. DE, AT, CH) angeben."
-            )
-    elif m.group("prefix"):
-        country = _ZIP_PREFIX.get(m.group("prefix"))
-    if country is None and len(m.group("zip")) == 4:
+    if len(parts) >= 2 and _country_part(parts[-1]):
+        country = _country_part(parts.pop())
+    rest: list[str] = []
+    for part in parts:
+        if re.match(r"^(?:c/o|z\.\s?h(?:d)?\.?|zu\s+h(?:än|aen)den)\s", part, re.I):
+            supplements.append(part)
+            continue
+        m = _ZIP_CITY_RE.match(part)
+        if m and "zip" not in out:
+            out["zip"] = m.group("zip")
+            city = m.group("city").strip()
+            note = re.search(r"\s*\(([^)]*)\)\s*$", city)
+            if note:
+                supplements.append(note.group(1).strip())
+                city = city[:note.start()].strip()
+            out["city"] = city
+            if m.group("prefix") and country is None:
+                country = _ZIP_PREFIX.get(m.group("prefix"))
+            continue
+        rest.append(part)
+    if "zip" not in out and len(rest) == 1:
+        # one line: "Westfalendamm 10 44141 Dortmund"
+        m = re.match(r"^(?P<street>.*?\d+\s*[a-zA-Z]?)\s+(?P<zipcity>\d{4,5}\s+\D.*)$",
+                     rest[0])
+        if m:
+            zc = _ZIP_CITY_RE.match(m.group("zipcity"))
+            if zc:
+                rest = [m.group("street").strip()]
+                out["zip"], out["city"] = zc.group("zip"), zc.group("city").strip()
+    if "zip" not in out:
+        return {"street": raw}  # no postcode: the text is the street (0.9.14)
+    if rest:
+        out["street"] = ", ".join(rest)
+    if supplements:
+        out["supplement"] = ", ".join(supplements)
+    if country is None and re.fullmatch(r"\d{4}\s?[A-Z]{2}", out["zip"]):
+        country = "NL"
+    if country is None and len(out["zip"]) == 4:
         raise LexwareError(
-            f"Die Postleitzahl {m.group('zip')} ist 4-stellig – bitte das Land dazu angeben "
+            f"Die Postleitzahl {out['zip']} ist 4-stellig – bitte das Land dazu angeben "
             "(z. B. „…, 1010 Wien, Österreich“)."
         )
-    return {"street": m.group("street").strip(), "zip": m.group("zip"),
-            "city": m.group("city").strip(), "countryCode": country or "DE"}
+    out["countryCode"] = country or "DE"
+    return {k: out[k] for k in ("supplement", "street", "zip", "city", "countryCode")
+            if k in out}
 
 
 def address_entry(value: Any) -> Any:
@@ -812,7 +861,7 @@ def normalize_contact(body: dict[str, Any], *, partial: bool = False) -> dict[st
     if "name" in body:
         name = one_line(body.pop("name"))
         if kind is None and not partial and not body.get("company") and not body.get("person"):
-            if _PERSON_SALUTATION.match(str(name)):
+            if PERSON_PREFIX.match(str(name)):
                 kind = "person"
             elif looks_like_person(str(name)):
                 raise LexwareError(
@@ -908,17 +957,63 @@ _COMPANY_WORDS = re.compile(
     re.I,
 )
 _TITLES = re.compile(r"^(?:dr\.?|prof\.?|dipl\.?-?\w*\.?|ing\.?|mag\.?)$", re.I)
+# A salutation or title in front: certainly a person ("Dr. Peter Lang").
+PERSON_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+", re.I)
+# Common first names (German/European). Only a name starting with one of
+# them is asked back — "Müller Weber", "Coal Control" stay companies.
+FIRST_NAMES = frozenset("""
+    peter michael thomas andreas wolfgang klaus jürgen juergen günter guenter stefan stephan
+    christian uwe werner horst frank dieter manfred bernd ralf ralph helmut martin hans
+    gerhard markus marcus heinz rolf karl walter matthias sven jens joachim alexander jan
+    holger dirk torsten thorsten jörg joerg wilhelm georg tobias daniel florian sebastian
+    tim tom lukas lucas jonas leon felix maximilian max paul elias noah luca julian moritz
+    niklas nils simon philipp fabian david benjamin jakob jacob johannes johann friedrich
+    fritz heinrich otto ernst kurt rudolf bernhard norbert reinhard rainer volker lothar
+    detlef harald hartmut herbert hubert josef joseph franz anton ludwig hermann gustav
+    oliver patrick dennis kevin marcel marco mario carsten kai timo nico nicolas niko robin
+    rene rené pascal dominik benedikt vincent valentin konstantin leonard emil oskar theo
+    mats finn ole erik eric henrik hendrik lars björn bjoern olaf arne knut sören soeren
+    gerd gert achim ulrich ulf jochen hannes adrian aaron samuel raphael rafael gabriel
+    mathias steffen till lutz anna maria ursula monika petra elisabeth sabine renate helga
+    karin brigitte ingrid erika andrea gisela claudia susanne gabriele christa christine
+    hannelore barbara angelika birgit heike nicole stefanie stephanie martina silke julia
+    katharina sandra kerstin anja tanja melanie christina laura lisa sarah sara lena lea
+    leonie hannah hanna emma mia sophie sofia emilia marie clara klara charlotte johanna
+    luisa louisa lina ella amelie paula ida greta frieda mila nele jana carina katrin
+    kathrin daniela simone manuela bettina doris heidi inge irmgard marion jutta regina rita
+    rosemarie ruth sieglinde ute vera waltraud beate cornelia elke iris karola marlies sonja
+    tina yvonne nadine nina miriam vanessa franziska jessica jennifer verena svenja annika
+    alina carolin caroline isabel isabell isabelle jasmin jacqueline ines britta dagmar
+    diana eva gudrun ilse käthe kaethe lieselotte margarete marianne claire chloé chloe
+    camille manon léa lucie julie élise elise anne pierre jean jacques louis luc marc michel
+    philippe antoine hugo mathieu françois francois giovanni giuseppe alessandro francesco
+    matteo lorenzo roberto paolo stefano antonio carlo giulia chiara francesca elena alessia
+    valentina federica pablo juan carlos javier miguel jose josé manuel lucia carmen pilar
+    ana john james robert william richard charles george edward henry jack harry olivia
+    emily jane mary elizabeth kate catherine susan karen linda helen piotr pawel paweł
+    tomasz krzysztof agnieszka katarzyna jiri jiří petr pavel anders astrid
+""".split())
+
+
+def _is_first_name(word: str) -> bool:
+    return word.strip(" .,").casefold() in FIRST_NAMES
 
 
 def looks_like_person(name: str) -> bool:
-    """"Peter Lang" yes; "Lang GmbH", "Studio 7", "Acme" no."""
+    """"Peter Lang", "Lang, Peter" yes; "Müller Weber", "Lang GmbH", "Acme" no."""
     text = name.strip()
     if not text or re.search(r"\d|[&+@/]", text) or _COMPANY_WORDS.search(text):
         return False
+    if text.count(",") == 1:  # "Lang, Peter"
+        last, first = (p.strip() for p in text.split(","))
+        first_words = first.split()
+        return bool(last) and 1 <= len(first_words) <= 2 and len(last.split()) <= 2 and (
+            _is_first_name(first_words[0]))
     words = [w for w in text.split() if not _TITLES.match(w)]
     if not 2 <= len(words) <= 3:
         return False
-    return all(re.fullmatch(r"[A-ZÄÖÜ][\w'’.-]*", w) for w in words)
+    return _is_first_name(words[0]) and all(
+        re.fullmatch(r"[A-ZÄÖÜ][\w'’.-]*", w) for w in words)
 
 
 def _one_line_names(body: dict[str, Any]) -> None:

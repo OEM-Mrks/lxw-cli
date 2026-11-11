@@ -397,7 +397,20 @@ def tax_type_word(value: Any) -> Any:
             f"Steuerart '{value}' ist mehrdeutig – bitte genauer angeben: "
             f"{_AMBIGUOUS_TAX[word]}."
         )
-    return _TAX_TYPES.get(word, value.strip())
+    if word in _TAX_TYPES:
+        return _TAX_TYPES[word]
+    # "Nettopreise", "netto (19%)", "inkl. MwSt", "Brutto inkl. USt": the price side
+    if re.search(r"brutto|gross|inkl|incl", word):
+        return "gross"
+    if re.search(r"netto|\bnet\b|zzgl|exkl|excl|plus\s+(?:mwst|ust)", word):
+        return "net"
+    raise LexwareError(
+        f"Unbekannte Steuerart '{value}'. Möglich: net (netto), gross (brutto), vatfree "
+        "(steuerfrei/Kleinunternehmer), intraCommunitySupply (innergemeinschaftliche "
+        "Lieferung), constructionService13b (§13b Bauleistung), externalService13b (§13b "
+        "ausländischer Leistender), thirdPartyCountryDelivery (Ausfuhr), "
+        "thirdPartyCountryService (Drittland-Leistung), photovoltaicEquipment (Photovoltaik)."
+    )
 
 
 _SHIPPING_TYPES = {
@@ -441,17 +454,20 @@ def _days(value: Any) -> Any:
 
 
 _TERM_DAYS_RE = re.compile(
-    r"(\d+)\s*(?:kalender|werk)?(?:tag\w*|days?)\b"
-    r"|\b(?:netto|net|innerhalb(?:\s+von)?|within)\s+(\d+)\b(?!\s*%)", re.I)
+    r"(\d+)\s*(?:kalender|werk)?(?:tag\w*|days?|d)\b"
+    r"|(\d+)\s*(?:woche\w*|weeks?)\b"
+    r"|\b(?:netto|net)\s+(\d+)\b(?!\s*%)", re.I)
 _TERM_PCT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:%|prozent|percent)", re.I)
 _TERM_UNTIL_RE = re.compile(
     r"\b(?:bis|until|by|spätestens|spaetestens)\s+(?:zum\s+|am\s+)?"
     r"(\d{1,2}\.\d{1,2}\.\d{2,4}|\d{4}-\d{2}-\d{2})", re.I)
+_DATE_IN_TEXT_RE = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}|\d{4}-\d{2}-\d{2}")
 _NO_SKONTO_RE = re.compile(r"\b(?:ohne|kein\w*|no|without)\s+(?:skonto|discount)\b", re.I)
+# Skonto only where the word says so — "Verzugszinsen 9 %", "50 % bei Auftrag" are none.
+_SKONTO_WORD_RE = re.compile(r"\b(?:skonto|discount)\b|(?<!ohne )\babzug\b", re.I)
 _TERM_ZERO_RE = re.compile(
-    r"\b(?:sofort|vorkasse|vorauskasse|immediately|bei\s+erhalt|upon\s+receipt|"
-    r"bar\s+bei|barzahlung|nachnahme)\b", re.I)
-_BARE_NUMBER_RE = re.compile(r"(?<![\w.,/-])(\d+)(?![\w.,/%-])")
+    r"\b(?:sofort|vorkasse|vorauskasse|immediately|(?:nach|bei)\s+(?:rechnungs)?erhalt|"
+    r"nach\s+erhalt|upon\s+receipt|on\s+receipt|bar\s+bei|barzahlung|nachnahme)\b", re.I)
 _NET_MARK_RE = re.compile(r"\b(?:netto|net|ohne\s+abzug|rein\s+netto|without\s+deduction)\b",
                           re.I)
 
@@ -461,6 +477,8 @@ class _Terms:
     days: int | None = None
     discount: dict[str, Any] | None = None
     no_skonto: bool = False
+    zero: bool = False  # only a "sofort"/"Vorkasse" text, no day count
+    skonto_unread: bool = False  # Skonto mentioned but not readable (lenient)
 
 
 def _clauses(text: str) -> list[str]:
@@ -470,125 +488,162 @@ def _clauses(text: str) -> list[str]:
 
 
 def _term_days(clause: str) -> list[tuple[int, int]]:
-    """(days, position) of every day count in a clause."""
+    """(days, position) of every day count ("14 Tage", "2 Wochen", "netto 30")."""
     out = []
     for m in _TERM_DAYS_RE.finditer(clause):
-        out.append((int(m.group(1) or m.group(2)), m.start()))
+        if m.group(2):
+            out.append((int(m.group(2)) * 7, m.start()))
+        else:
+            out.append((int(m.group(1) or m.group(3)), m.start()))
     return out
 
 
-def parse_terms(text: str, start: date | None) -> _Terms:
+def parse_terms(text: str, start: date | None, *, strict: bool = True) -> _Terms:
     """Free payment text → net days and Skonto.
 
     "14 Tage 2 % Skonto, 30 Tage netto", "30 Tage netto, 3 % Skonto bei Zahlung
     innerhalb 10 Tagen", "netto 30", "30 days net", "Zahlbar bis 01.12.2026":
     the day count next to "%"/"Skonto" is the Skonto period, the other one the
-    net term. Text that cannot be read unambiguously raises.
+    net term. Only numbers with "Tage/days/d" (or "netto 30") are day counts;
+    other numbers (Kd.-Nr., Mahngebühr) do not matter. `strict` (an explicit
+    zahlungsziel) raises on anything unclear; otherwise (a text of the caller's
+    own) only what is clear is taken and the rest is left alone.
     """
     raw = str(text)
-    terms = _Terms(no_skonto=bool(_NO_SKONTO_RE.search(raw)))
     if re.fullmatch(r"\s*\d+\s*", raw):
         return _Terms(days=int(raw))
+    terms = _Terms(no_skonto=bool(_NO_SKONTO_RE.search(raw)))
+
+    def unclear(message: str) -> None:
+        if strict:
+            raise LexwareError(message)
+
     pct: str | None = None
     skonto_days: list[int] = []
     other: list[tuple[int, bool]] = []  # (days, next to a net word)
-    bare: list[int] = []  # numbers without "Tage" next to other day counts
+    counted = False
     for clause in _clauses(raw):
         found = _term_days(clause)
+        counted = counted or bool(found)
         m = _TERM_PCT_RE.search(clause)
-        if m and not terms.no_skonto:
+        until = _TERM_UNTIL_RE.search(clause)
+        if m and _SKONTO_WORD_RE.search(clause) and not terms.no_skonto:
             if pct is not None and pct != m.group(1):
-                raise LexwareError(
-                    f"Zahlungsbedingung '{raw}': mehrere Skonto-Sätze – bitte nur einen angeben."
-                )
+                unclear(f"Zahlungsbedingung '{raw}': mehrere Skonto-Sätze – bitte nur einen "
+                        "angeben.")
+                terms.skonto_unread = True
             pct = m.group(1)
             if len(found) >= 2:
                 values = sorted(d for d, _ in found)
                 skonto_days.append(values[0])
                 other.append((values[-1], True))
-            else:
+            elif found:
                 skonto_days += [d for d, _ in found]
-        else:
-            net_word = bool(_NET_MARK_RE.search(clause))
-            other += [(d, net_word) for d, _ in found]
-            if not found and not _TERM_UNTIL_RE.search(clause):
-                bare += [int(n) for n in _BARE_NUMBER_RE.findall(clause)]
-    if re.search(r"skonto|discount", raw, re.I) and pct is None and not terms.no_skonto:
-        raise LexwareError(
-            f"Zahlungsbedingung '{raw}': Skonto ohne Prozentsatz – bitte z. B. „14 Tage 2 % "
-            "Skonto, 30 Tage netto“ angeben."
-        )
-    until = _TERM_UNTIL_RE.search(raw)
-    if until:
-        day = _parse_day(until.group(1))
-        if day is None or start is None:
-            raise LexwareError(f"Zahlungsbedingung '{raw}': Datum nicht lesbar.")
-        if day < start:
-            raise LexwareError(
-                f"Die Fälligkeit {day:%d.%m.%Y} liegt vor dem Belegdatum {start:%d.%m.%Y} – "
-                "bitte ein späteres Datum oder ein Zahlungsziel in Tagen angeben."
-            )
-        other.append(((day - start).days, True))
+            elif until:
+                unclear(f"Zahlungsbedingung '{raw}': Skonto bis zu einem Datum lässt sich nicht "
+                        "übernehmen – bitte die Skontofrist in Tagen angeben.")
+                terms.skonto_unread = True
+            continue
+        net_word = bool(_NET_MARK_RE.search(clause))
+        other += [(d, net_word) for d, _ in found]
+        if until:
+            day = _parse_day(until.group(1))
+            if day is None or start is None:
+                unclear(f"Zahlungsbedingung '{raw}': Datum nicht lesbar.")
+            elif day < start:
+                unclear(f"Die Fälligkeit {day:%d.%m.%Y} liegt vor dem Belegdatum "
+                        f"{start:%d.%m.%Y} – bitte ein späteres Datum oder ein Zahlungsziel "
+                        "in Tagen angeben.")
+            else:
+                other.append(((day - start).days, True))
+                counted = True
+    if re.search(r"\bskonto\b", raw, re.I) and pct is None and not terms.no_skonto:
+        unclear(f"Zahlungsbedingung '{raw}': Skonto ohne Prozentsatz – bitte z. B. „14 Tage "
+                "2 % Skonto, 30 Tage netto“ angeben.")
+        terms.skonto_unread = True
     nets = sorted({d for d, _ in other})
-    if bare and (nets or skonto_days):
-        raise LexwareError(
-            f"Zahlungsbedingung '{raw}' ist nicht eindeutig (Zahl ohne „Tage“: "
-            f"{', '.join(str(b) for b in bare)}) – bitte z. B. „30 Tage netto“ angeben."
-        )
     if len(nets) > 1:
         marked = sorted({d for d, net in other if net})
-        if len(marked) != 1:
-            raise LexwareError(
-                f"Zahlungsbedingung '{raw}' ist nicht eindeutig (mehrere Fristen: "
-                f"{', '.join(str(n) for n in nets)} Tage) – bitte z. B. „30 Tage netto“ "
-                "oder „14 Tage 2 % Skonto, 30 Tage netto“."
-            )
-        nets = marked
+        if len(marked) == 1:
+            nets = marked
+        else:
+            unclear(f"Zahlungsbedingung '{raw}' ist nicht eindeutig (mehrere Fristen: "
+                    f"{', '.join(str(n) for n in nets)} Tage) – bitte z. B. „30 Tage netto“ "
+                    "oder „14 Tage 2 % Skonto, 30 Tage netto“.")
+            nets = []
     if nets:
         terms.days = nets[0]
-    elif not skonto_days and pct is None and _TERM_ZERO_RE.search(raw):
+    elif not counted and not skonto_days and pct is None and _TERM_ZERO_RE.search(raw):
         terms.days = 0
-    elif not skonto_days and pct is None and not re.search(r"\d", raw):
+        terms.zero = True
+    elif not counted and not skonto_days and pct is None and not re.search(r"\d", raw):
         for word, days in _DAY_WORDS.items():
             if re.search(rf"\b{word}\b", raw, re.I):
                 terms.days = days
+                terms.zero = days == 0
                 break
     if pct is not None:
+        problem = None
         if len(set(skonto_days)) != 1:
-            raise LexwareError(
-                f"Zahlungsbedingung '{raw}': Skonto braucht genau eine Frist, z. B. „2 % "
-                "Skonto bei Zahlung innerhalb von 10 Tagen, 30 Tage netto“."
-            )
-        if terms.days is None:
-            raise LexwareError(
-                f"Zahlungsbedingung '{raw}': Neben dem Skonto fehlt die Zahlungsfrist – bitte "
-                "z. B. „…, 30 Tage netto“ ergänzen."
-            )
-        if skonto_days[0] >= terms.days:
-            raise LexwareError(
-                f"Zahlungsbedingung '{raw}' ist nicht eindeutig: Die Skontofrist "
-                f"({skonto_days[0]} Tage) muss kürzer sein als die Zahlungsfrist "
-                f"({terms.days} Tage)."
-            )
-        terms.discount = {
-            "discountPercentage": to_number(pct, field="Skonto-Prozent", kind="percent"),
-            "discountRange": skonto_days[0],
-        }
+            problem = (f"Zahlungsbedingung '{raw}': Skonto braucht genau eine Frist, z. B. „2 % "
+                       "Skonto bei Zahlung innerhalb von 10 Tagen, 30 Tage netto“.")
+        elif terms.days is None:
+            problem = (f"Zahlungsbedingung '{raw}': Neben dem Skonto fehlt die Zahlungsfrist – "
+                       "bitte z. B. „…, 30 Tage netto“ ergänzen.")
+        elif skonto_days[0] >= terms.days:
+            problem = (f"Zahlungsbedingung '{raw}' ist nicht eindeutig: Die Skontofrist "
+                       f"({skonto_days[0]} Tage) muss kürzer sein als die Zahlungsfrist "
+                       f"({terms.days} Tage).")
+        if problem:
+            unclear(problem)
+            terms.skonto_unread = True
+        else:
+            terms.discount = {
+                "discountPercentage": to_number(pct, field="Skonto-Prozent", kind="percent"),
+                "discountRange": skonto_days[0],
+            }
     return terms
 
 
-# German standard labels this server writes (so a copy into an English
-# document can be translated instead of keeping the German text).
-_GERMAN_STANDARD_LABEL = re.compile(
-    r"^(?:Zahlbar sofort, rein netto|Zahlbar innerhalb von \d+ Tagen(?: ohne Abzug)?\.?"
-    r"(?: Bei Zahlung innerhalb von \d+ Tagen [\d.,]+ % Skonto\.)?|"
-    r"Zahlbar bis \d{2}\.\d{2}\.\d{4} ohne Abzug)$"
+def _disc(pct: str, days: str) -> dict[str, Any]:
+    return {"discountPercentage": to_number(pct, field="Skonto-Prozent", kind="percent"),
+            "discountRange": int(days)}
+
+
+# The standard texts of Lexware and of this server (full match only). Such a
+# text is rebuilt when term or Skonto change; any other text is the caller's
+# own and stays as it is.
+_STANDARD_LABELS: tuple[tuple[re.Pattern[str], str, Any], ...] = (
+    (re.compile(r"Zahlbar sofort, rein netto\.?"), "de", lambda m: (0, None, None)),
+    (re.compile(r"Zahlbar innerhalb von (\d+) Tagen(?: ohne Abzug)?\.?"), "de",
+     lambda m: (int(m[1]), None, None)),
+    (re.compile(r"Zahlbar innerhalb von (\d+) Tagen\. Bei Zahlung innerhalb von (\d+) Tagen "
+                r"(\d+(?:[.,]\d+)?) ?% Skonto\.?"), "de",
+     lambda m: (int(m[1]), _disc(m[3], m[2]), None)),
+    (re.compile(r"Zahlbar bis (\d{2}\.\d{2}\.\d{4}) ohne Abzug\.?"), "de",
+     lambda m: (None, None, m[1])),
+    (re.compile(r"(\d+) Tage -\s?(\d+(?:[.,]\d+)?) ?%, (\d+) Tage netto\.?"), "de",
+     lambda m: (int(m[3]), _disc(m[2], m[1]), None)),
+    (re.compile(r"Payable immediately without deduction\.?"), "en", lambda m: (0, None, None)),
+    (re.compile(r"Payable within (\d+) days without deduction\.?"), "en",
+     lambda m: (int(m[1]), None, None)),
+    (re.compile(r"Payable within (\d+) days\. (\d+(?:[.,]\d+)?) ?% discount if paid within "
+                r"(\d+) days\.?"), "en", lambda m: (int(m[1]), _disc(m[2], m[3]), None)),
 )
 
 
+def standard_label(label: Any) -> tuple[str, int | None, Any, str | None] | None:
+    """(language, days, Skonto, due date text) of a standard text, else None."""
+    text = re.sub(r"\s+", " ", str(label or "")).strip()
+    for pattern, lang, read in _STANDARD_LABELS:
+        m = pattern.fullmatch(text)
+        if m:
+            return (lang, *read(m))
+    return None
+
+
 def is_standard_label(label: Any) -> bool:
-    text = str(label or "").strip()
-    return bool(_GERMAN_STANDARD_LABEL.match(text)) or text.startswith("Payable ")
+    return standard_label(label) is not None
 
 
 def _lower_keys(out: dict[str, Any], known: Any) -> None:
@@ -852,11 +907,21 @@ def _discount_value(value: Any) -> tuple[Any, Any]:
     return pct, (_days(rng) if rng is not None else None)
 
 
-def _payment(out: dict[str, Any], *, language: Any, need_days: bool = True) -> None:
+def _payment(
+    out: dict[str, Any], *, language: Any, need_days: bool = True, is_copy: bool = False
+) -> None:
     """zahlungsziel, paymentConditions (text, label, duration), Skonto and dueDate
-    → one consistent paymentConditions block; contradictions raise."""
+    → one consistent paymentConditions block.
+
+    Explicit values (zahlungsziel, paymentTermDuration, Skonto) win. A standard
+    text (Lexware's own wording) is rebuilt from them; a "sofort"/"Vorkasse"
+    text is rebuilt when a term is given; any other text is the caller's own
+    and stays exactly as written — only when it names another day count than
+    the given term, that is a contradiction.
+    """
+    notes: list[str] = out.setdefault("__pay_notes", [])
     start = _day_of(out.get("voucherDate"))
-    days_given: list[tuple[str, int]] = []
+    explicit: list[tuple[str, int]] = []
     discounts: list[tuple[str, dict[str, Any]]] = []
     no_skonto = False
     for key in _TERM_KEYS:
@@ -872,14 +937,14 @@ def _payment(out: dict[str, Any], *, language: Any, need_days: bool = True) -> N
                     f"Zahlungsziel '{value}' nicht lesbar – bitte Tage als Zahl angeben "
                     "(z. B. 14) oder z. B. „14 Tage 2 % Skonto, 30 Tage netto“."
                 )
-            days_given.append(("zahlungsziel", terms.days))
+            explicit.append(("zahlungsziel", terms.days))
             if terms.discount:
                 discounts.append(("zahlungsziel", terms.discount))
             no_skonto = no_skonto or terms.no_skonto
         else:
-            days_given.append(("zahlungsziel", _days(value)))
+            explicit.append(("zahlungsziel", _days(value)))
     raw = out.get("paymentConditions")
-    if raw is None and not days_given:
+    if raw is None and not explicit:
         return
     if isinstance(raw, str):
         raw = {"paymentTermLabel": raw}
@@ -893,28 +958,75 @@ def _payment(out: dict[str, Any], *, language: Any, need_days: bool = True) -> N
         pct, rng = _discount_value(block["paymentDiscountConditions"])
         if pct:
             discounts.insert(0, ("skonto", {"discountPercentage": pct, "discountRange": rng}))
+        else:
+            block.pop("paymentDiscountConditions")  # 0 % / 0 Tage = no Skonto
     if block.get("paymentTermDuration") is not None:
-        days_given.append(("paymentTermDuration", _days(block["paymentTermDuration"])))
-    keep_label = False
-    label = block.get("paymentTermLabel")
-    if isinstance(label, str) and label.strip():
-        try:
-            terms = parse_terms(label, start)
-        except LexwareError:
-            if block.get("paymentTermDuration") is None:
-                raise
-            terms = _Terms()  # an own text next to a given duration stays as it is
-        if terms.days is not None:
-            days_given.append(("paymentTermLabel", terms.days))
-        if terms.discount:
-            discounts.append(("paymentTermLabel", terms.discount))
-        no_skonto = no_skonto or terms.no_skonto
-        keep_label = not terms.discount and not is_standard_label(label)
-    if len({d for _, d in days_given}) > 1:
-        listing = ", ".join(f"{src} {d} Tage" for src, d in days_given)
+        explicit.append(("paymentTermDuration", _days(block["paymentTermDuration"])))
+    if len({d for _, d in explicit}) > 1:
+        listing = ", ".join(f"{src} {d} Tage" for src, d in explicit)
         raise LexwareError(
             f"Widersprüchliche Zahlungsfristen ({listing}) – bitte nur eine Frist angeben."
         )
+    days = explicit[0][1] if explicit else None
+    label = block.get("paymentTermLabel")
+    label = label.strip() if isinstance(label, str) and label.strip() else None
+    kind = "none"
+    label_days: int | None = None
+    label_disc: dict[str, Any] | None = None
+    regenerate = label is None
+    if label:
+        std = standard_label(label)
+        if std:
+            kind = "standard"
+            label_lang, label_days, label_disc, until = std
+            if until:
+                day = _parse_day(until)
+                label_days = (day - start).days if day and start and day >= start else None
+            if label_lang == "de" and str(language or "").casefold() == "en":
+                regenerate = True  # a German standard text on an English document
+        else:
+            terms = parse_terms(label, start, strict=False)
+            kind = "zero" if terms.zero else "own"
+            label_days, label_disc = terms.days, terms.discount
+            no_skonto = no_skonto or terms.no_skonto
+            if terms.skonto_unread and not discounts:
+                notes.append(f"Das Skonto im Zahlungstext „{label}“ wurde nicht als "
+                             "Skonto-Bedingung übernommen – dafür skonto angeben (z. B. "
+                             "„2 % 7 Tage“).")
+    if label and is_copy and _DATE_IN_TEXT_RE.search(label) and days is not None:
+        # the dates in the text belong to the document that was read
+        regenerate = True
+        notes.append(f"Der Zahlungstext „{label}“ nannte Daten des alten Belegs – neu "
+                     f"gebildet aus der Frist ({days} Tage).")
+    elif label and days is None:
+        days = label_days
+    elif label and label_days is not None and label_days != days:
+        if kind == "own":
+            raise LexwareError(
+                f"Widersprüchliche Zahlungsfristen: Der Zahlungstext „{label}“ nennt "
+                f"{label_days} Tage, die Frist ist {days} Tage – bitte nur eines angeben."
+            )
+        regenerate = True
+        if kind == "zero":
+            notes.append(f"Der Zahlungstext „{label}“ (sofort) passte nicht zur Frist "
+                         f"{days} Tage – neu gebildet.")
+    if label_disc:
+        same = discounts and (float(discounts[0][1]["discountPercentage"]),
+                              discounts[0][1]["discountRange"]) == (
+            float(label_disc["discountPercentage"]), label_disc["discountRange"])
+        if discounts and not same:
+            if kind == "own":
+                raise LexwareError(
+                    f"Widersprüchliches Skonto: Der Zahlungstext „{label}“ nennt "
+                    f"{label_disc['discountPercentage']} % / {label_disc['discountRange']} "
+                    f"Tage, angegeben ist {discounts[0][1]['discountPercentage']} % / "
+                    f"{discounts[0][1]['discountRange']} Tage – bitte nur eines."
+                )
+            regenerate = True
+        elif not discounts:
+            discounts.append(("label", label_disc))
+    elif kind == "standard" and discounts:
+        regenerate = True  # the standard text does not mention the Skonto
     if len({(float(d["discountPercentage"]), d["discountRange"]) for _, d in discounts}) > 1:
         listing = ", ".join(f"{d['discountPercentage']} % / {d['discountRange']} Tage"
                             for _, d in discounts)
@@ -922,27 +1034,32 @@ def _payment(out: dict[str, Any], *, language: Any, need_days: bool = True) -> N
     if no_skonto and discounts:
         raise LexwareError("Skonto ist zugleich angegeben und ausgeschlossen („ohne Skonto“) "
                            "– bitte eines von beiden.")
-    days = days_given[0][1] if days_given else None
     if days is not None:
         block["paymentTermDuration"] = days
     if discounts:
         block["paymentDiscountConditions"] = discounts[0][1]
+        if kind == "standard" and label_disc is None:
+            regenerate = True
     elif no_skonto or removal:
         block["paymentDiscountConditions"] = None
-    if days is not None and (not keep_label or discounts):
+        if kind == "standard" and label_disc:
+            regenerate = True
+    if regenerate and days is not None:
         block["paymentTermLabel"] = _payment_label(
             days, block.get("paymentDiscountConditions"), language)
+        block.pop("paymentTermLabelTemplate", None)  # its old wording would win
         block["__autolabel"] = True
-    if days is None and need_days and (block.get("paymentTermLabel") or discounts):
+    if days is None and need_days and discounts:
         raise LexwareError(
-            f"Die Zahlungsbedingung '{label or ''}' enthält keine Frist – bitte zusätzlich "
-            "zahlungsziel in Tagen angeben (z. B. 14)."
+            "Für das Skonto fehlt die Zahlungsfrist – bitte auch zahlungsziel in Tagen "
+            "angeben (z. B. 30)."
         )
     out["paymentConditions"] = block
 
 
 def _due_and_delivery(
-    out: dict[str, Any], kind: str, *, language: Any = None, need_days: bool = True
+    out: dict[str, Any], kind: str, *, language: Any = None, need_days: bool = True,
+    is_copy: bool = False,
 ) -> None:
     """dueDate → paymentTermDuration, deliveryDate → shippingConditions."""
     language = out.get("language") or language
@@ -975,7 +1092,7 @@ def _due_and_delivery(
                 f"{block['paymentTermDuration']} Tage widersprechen sich – bitte nur eines."
             )
         out["paymentConditions"] = {**block, "paymentTermDuration": n}
-        _payment(out, language=language, need_days=need_days)
+        _payment(out, language=language, need_days=need_days, is_copy=is_copy)
         cond = out["paymentConditions"]
         if cond.pop("__autolabel", False) and not cond.get("paymentDiscountConditions"):
             cond["paymentTermLabel"] = _payment_label(n, None, language, until=end)
@@ -983,7 +1100,7 @@ def _due_and_delivery(
         elif cond.get("paymentDiscountConditions"):
             cond["__autolabel"] = True
     else:
-        _payment(out, language=language, need_days=need_days)
+        _payment(out, language=language, need_days=need_days, is_copy=is_copy)
     delivery = None
     kind_of_date = None
     # The word decides what the document prints: Lieferdatum vs. Leistungsdatum
@@ -1070,6 +1187,7 @@ def prepare_changes(
     due = out.get("dueDate")
     _due_and_delivery(out, kind if kind in (INVOICE, ORDER_CONFIRMATION, DELIVERY_NOTE)
                       else INVOICE, language=lang, need_days=False)
+    notes += out.pop("__pay_notes", [])
     if due and "paymentConditions" not in out and kind != DELIVERY_NOTE:
         raise LexwareError(
             f"Die Fälligkeit '{due}' passt nicht zum Belegdatum – bitte ein späteres Datum "
@@ -1133,6 +1251,8 @@ def _payment_label(
     english = str(language or "").casefold() == "en"
     if isinstance(discount, dict) and discount.get("discountPercentage"):
         pct, rng = discount.get("discountPercentage"), discount.get("discountRange")
+        if isinstance(pct, float) and not english:
+            pct = f"{pct:g}".replace(".", ",")  # 2,5 % Skonto
         if english:
             return (f"Payable within {days} days. {pct} % discount if paid within "
                     f"{rng} days.")
@@ -1204,77 +1324,82 @@ def _price_from_article(article: dict[str, Any], tax_type: str) -> dict[str, Any
     return out
 
 
-# -- quantities with a unit ("3 Stück", "2 Std") -------------------------------
+# -- quantities with a unit ("5 Rollen", "2 Std") -------------------------------
 
-_UNIT_GROUPS: dict[str, tuple[str, ...]] = {
-    "piece": ("stück", "stueck", "stck", "stk", "st", "x", "mal", "pcs", "pc", "piece",
-              "pieces", "teil", "teile", "exemplar", "exemplare", "ex", "anzahl"),
-    "hour": ("std", "stunde", "stunden", "h", "hour", "hours", "hr", "hrs"),
-    "minute": ("min", "minute", "minuten", "minutes", "mins"),
-    "day": ("tag", "tage", "tagen", "d", "day", "days", "arbeitstag", "arbeitstage"),
-    "week": ("woche", "wochen", "week", "weeks"),
-    "month": ("monat", "monate", "month", "months"),
-    "km": ("km", "kilometer"),
-    "kg": ("kg", "kilogramm", "kilo"),
-    "m": ("m", "meter", "lfm", "laufmeter"),
-    "m2": ("m2", "m²", "qm", "quadratmeter"),
-    "l": ("l", "liter"),
-    "flat": ("pauschal", "psch", "pauschale", "flat", "pausch"),
-    "set": ("set", "sets"),
-    "pkg": ("paket", "pakete", "packung", "packungen", "pck", "pkg"),
-}
-_UNIT_LOOKUP = {word: group for group, words in _UNIT_GROUPS.items() for word in words}
-_UNIT_NAMES = {"hour": "Stunde", "minute": "Minute", "day": "Tag", "week": "Woche",
-               "month": "Monat", "km": "km", "kg": "kg", "m": "m", "m2": "m²", "l": "Liter",
-               "flat": "pauschal", "set": "Set", "pkg": "Paket", "piece": "Stück"}
+# (group, unit) of the units that can contradict each other: "30 min" on a
+# position in hours is refused, "5 Rollen", "1000 Etiketten" are just fine.
+_UNITS: dict[str, tuple[str, str]] = {}
+for _group, _unit, _words in (
+    ("time", "second", "s sek sec sekunde sekunden"),
+    ("time", "minute", "min mins minute minuten"),
+    ("time", "hour", "h std stunde stunden hr hrs hour hours"),
+    ("time", "day", "tag tage tagen day days"),
+    ("time", "week", "woche wochen week weeks"),
+    ("time", "month", "monat monate month months"),
+    ("weight", "g", "g gramm"),
+    ("weight", "kg", "kg kilo kilogramm"),
+    ("weight", "t", "t tonne tonnen"),
+    ("length", "mm", "mm millimeter"),
+    ("length", "cm", "cm zentimeter"),
+    ("length", "m", "m meter lfm"),
+    ("length", "km", "km kilometer"),
+    ("volume", "ml", "ml milliliter"),
+    ("volume", "l", "l liter litre"),
+):
+    for _w in _words.split():
+        _UNITS[_w] = (_group, _unit)
+_UNIT_NAMES = {"second": "Sekunde", "minute": "Minute", "hour": "Stunde", "day": "Tag",
+               "week": "Woche", "month": "Monat", "l": "Liter"}
+_PIECE_WORDS = {"stück", "stueck", "stck", "stk", "st", "x", "pcs", "pc", "piece", "pieces"}
+_QTY_UNIT_RE = re.compile(r"\s*([+-]?\d[\d.,\s]*?)\s*([^\W\d_][\w²³/-]*?)\.?\s*")
 
 
-def _unit_group(word: Any) -> str:
-    text = str(word or "").strip().casefold().rstrip(".")
-    return _UNIT_LOOKUP.get(text, text)
+def _unit_of(word: Any) -> tuple[str, str] | None:
+    return _UNITS.get(str(word or "").strip().casefold().rstrip("."))
 
 
 def _quantity(item: dict[str, Any]) -> None:
-    """quantity "3 Stück" / "2 Std" → number; a unit that does not fit raises."""
+    """quantity "5 Rollen" / "2 Std" → number; the unit is checked once the
+    position's unit is known (article positions: the article's)."""
     raw = item.get("quantity")
     if not isinstance(raw, str):
         return
     import unicodedata
 
     text = unicodedata.normalize("NFKC", raw)
-    m = re.fullmatch(r"\s*([+-]?\d[\d.,\s]*?)\s*([^\d\s.,].*?)?\s*", text)
-    unit = m.group(2) if m else None
-    if not unit or (_unit_group(unit) not in _UNIT_GROUPS and _unit_group(unit) != _unit_group(
-            item.get("unitName"))):
-        return  # no unit, or not a unit: to_decimal explains it
+    try:
+        to_number(text, field="quantity", kind="quantity")
+        return  # a plain number ("2,5", "2e3")
+    except LexwareError:
+        pass
+    m = _QTY_UNIT_RE.fullmatch(text)
+    if not m or is_change(text):
+        return  # not "number + one word": to_number explains it
     item["quantity"] = m.group(1)
-    if item.get("unitName"):
-        _check_unit(raw, unit, item["unitName"])
-    else:
-        item["__qty_unit"] = (raw, unit)
-
-
-def _check_unit(raw: str, unit: str, unit_name: str) -> None:
-    if _unit_group(unit) == _unit_group(unit_name):
-        return
-    example = (", z. B. 0,5 für eine halbe Stunde" if _unit_group(unit_name) == "hour"
-               and _unit_group(unit) == "minute" else "")
-    raise LexwareError(
-        f"Menge '{raw}' passt nicht zur Einheit der Position ({unit_name}) – bitte die Menge "
-        f"in {unit_name} angeben{example}."
-    )
+    item["__qty_unit"] = (raw, m.group(2))
 
 
 def _finish_unit(item: dict[str, Any]) -> None:
-    """The unit written next to the quantity, once the article's unit is known."""
+    """The word written next to the quantity, against the position's unit."""
     stash = item.pop("__qty_unit", None)
     if not stash:
         return
-    raw, unit = stash
-    if item.get("unitName"):
-        _check_unit(raw, unit, item["unitName"])
-    elif _unit_group(unit) != "piece":
-        item["unitName"] = _UNIT_NAMES.get(_unit_group(unit), unit)
+    raw, word = stash
+    unit_name = item.get("unitName")
+    if unit_name:
+        have, said = _unit_of(unit_name), _unit_of(word)
+        if have and said and have[0] == said[0] and have[1] != said[1]:
+            example = (", z. B. 0,5 für eine halbe Stunde" if have[1] == "hour"
+                       and said[1] == "minute" else "")
+            raise LexwareError(
+                f"Menge '{raw}' passt nicht zur Einheit der Position ({unit_name}) – bitte die "
+                f"Menge in {unit_name} angeben{example}."
+            )
+        return
+    if str(word).casefold().rstrip(".") in _PIECE_WORDS:
+        return  # the default unit (Stück)
+    said = _unit_of(word)
+    item["unitName"] = _UNIT_NAMES.get(said[1], said[1]) if said else str(word).rstrip(".")
 
 
 def _normalize_line(
@@ -1480,6 +1605,12 @@ def _complete_lines(
                     from_article = _price_from_article(article, tax_type)
                     if from_article:
                         item["unitPrice"] = {**from_article, **(item.get("unitPrice") or {})}
+                elif item["unitPrice"].get("taxRatePercentage") is None:
+                    # own price, no rate given: the article's rate (7 % book), not 19
+                    rate = (article.get("price") or {}).get("taxRate") if isinstance(
+                        article.get("price"), dict) else None
+                    if rate is not None:
+                        item["unitPrice"]["taxRatePercentage"] = rate
         _finish_unit(item)
         if item.get("type") == "text":
             continue
@@ -1618,7 +1749,8 @@ def prepare_document(
             '[{"type": "custom", "name": "Beratung", "quantity": 1, "unitName": "Stunde", '
             '"unitPrice": {"netAmount": 95, "taxRatePercentage": 19}}].'
         )
-    _due_and_delivery(out, kind)
+    _due_and_delivery(out, kind, is_copy=bool(out.get("__copy")))
+    notes += out.pop("__pay_notes", [])
     if isinstance(out.get("paymentConditions"), dict):
         out["paymentConditions"].pop("__autolabel", None)
         if out["paymentConditions"].get("paymentDiscountConditions", "") is None:
@@ -1639,7 +1771,9 @@ def prepare_document(
             address["countryCode"] = country_code(given)
         else:
             address["countryCode"] = "DE"
-    foreign = drop_foreign_standard_texts(out, kind)
+    # only the texts of a document read and sent back as a copy — a text the
+    # caller wrote stays, even if it happens to be another type's standard text
+    foreign = drop_foreign_standard_texts(out, kind) if out.get("__copy") else None
     if foreign:
         notes.append(foreign)
 
@@ -1842,17 +1976,19 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
         if alias in out and "contactName" not in out and "contactId" not in out:
             out["contactName"] = out.pop(alias)
     status = str(out.get("voucherStatus") or "").strip().casefold()
-    if status in ("bezahlt", "paid", "paidoff", "beglichen", "ausgeglichen", "erledigt"):
-        raise LexwareError(
-            "Ein Buchhaltungsbeleg lässt sich über die Schnittstelle nicht als bezahlt anlegen "
-            "– er wird offen gebucht; die Zahlung ordnet Lexware beim Bankabgleich zu (oder "
-            "in Lexware „als bezahlt markieren“). Bitte voucherStatus weglassen."
-        )
     if status:
-        out["voucherStatus"] = {"offen": "open", "zu prüfen": "unchecked",
-                                "zu pruefen": "unchecked", "ungeprüft": "unchecked",
-                                "ungeprueft": "unchecked", "prüfen": "unchecked"}.get(
-            status, out["voucherStatus"])
+        mapped = {"offen": "open", "open": "open", "zu prüfen": "unchecked",
+                  "zu pruefen": "unchecked", "ungeprüft": "unchecked",
+                  "ungeprueft": "unchecked", "prüfen": "unchecked",
+                  "unchecked": "unchecked"}.get(status)
+        if mapped:
+            out["voucherStatus"] = mapped
+        else:
+            # e.g. "paid" of a voucher read and sent back: Lexware sets it itself
+            out["__hinweis"] = (
+                f"Status „{out.pop('voucherStatus')}“ nicht übernommen – Lexware bucht den "
+                "Beleg offen und setzt den Status selbst (Zahlung per Bankabgleich oder in "
+                "Lexware „als bezahlt markieren“).")
     # a receipt with one amount: build the single item
     for key in ("bezahlt", "paid", "zahlungsart", "bar", "paymentMethod", "zahlung"):
         if key in out:
@@ -1897,16 +2033,15 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
         if category and not item.get("categoryId") and not item.get("kategorie") \
                 and not item.get("category"):
             item["categoryId"] = category  # the voucher's category for every position
+        net_value = gross_value = None
         for alias in ("netto", "betrag_netto", "nettobetrag", "net", "amount_net",
                       "netAmount"):
             if alias in item:
-                item_sides.append("net")
-                item.setdefault("amount", item.pop(alias))
+                net_value = item.pop(alias)
         for alias in ("brutto", "betrag_brutto", "bruttobetrag", "gross", "amount_gross",
                       "grossAmount"):
             if alias in item:
-                item_sides.append("gross")
-                item.setdefault("amount", item.pop(alias))
+                gross_value = item.pop(alias)
         if isinstance(item.get("amount"), str):
             rest, word = split_gross_net(item["amount"])
             if word:
@@ -1919,6 +2054,30 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
             item["taxRatePercent"] = _tax_rate(item["taxRatePercent"])
         if item.pop("steuerfrei", None) in (True, "ja", "true", 1):
             item["taxRatePercent"] = 0
+        if net_value is not None and gross_value is not None:
+            # both given: fine when they fit the rate — the side of the voucher wins
+            net_n = to_number(net_value, field="netto", kind="money")
+            gross_n = to_number(gross_value, field="brutto", kind="money")
+            rate_n = item.get("taxRatePercent")
+            if not isinstance(rate_n, (int, float)):
+                raise LexwareError(
+                    f"Position mit netto {net_n} und brutto {gross_n}: bitte den Steuersatz "
+                    "dazu angeben – oder nur einen der beiden Beträge."
+                )
+            if abs(net_n * (1 + rate_n / 100) - gross_n) > 0.02:
+                raise LexwareError(
+                    f"Netto {net_n} und Brutto {gross_n} passen bei {rate_n} % nicht "
+                    "zusammen – bitte nur einen Betrag angeben (netto ODER brutto)."
+                )
+            side = _TAX_TYPES.get(str(out.get("taxType") or "").strip().casefold(), "gross")
+            item.setdefault("amount", net_n if side == "net" else gross_n)
+            item_sides.append("net" if side == "net" else "gross")
+        elif net_value is not None:
+            item_sides.append("net")
+            item.setdefault("amount", net_value)
+        elif gross_value is not None:
+            item_sides.append("gross")
+            item.setdefault("amount", gross_value)
         for alias, target in (("betrag", "amount"),
                               ("category", "categoryId"), ("kategorie", "categoryId"),
                               ("steuerbetrag", "taxAmount"), ("tax_amount", "taxAmount")):
@@ -1991,7 +2150,7 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
             "(alle netto oder alle brutto)."
         )
     if raw_tax:
-        out["taxType"] = _TAX_TYPES.get(raw_tax, out.get("taxType"))
+        out["taxType"] = tax_type_word(out.get("taxType"))
         if sides and out["taxType"] in _TAXED_TYPES and sides != {out["taxType"]}:
             side = "Nettobeträge (netto)" if "net" in sides else "Bruttobeträge (brutto)"
             raise LexwareError(
@@ -2052,10 +2211,9 @@ def prepare_voucher(body: dict[str, Any]) -> dict[str, Any]:
             "Beträge bzw. taxType prüfen."
         )
     if given is not None and _money(given) != _money(total_gross):
-        out["__hinweis"] = (
+        out["__hinweis"] = " ".join(n for n in (out.get("__hinweis"), (
             f"Gesamtbetrag laut Angabe {_money(given):.2f} €, gebucht "
-            f"{_money(total_gross):.2f} € (Summe der Positionen, Rundungsdifferenz)."
-        )
+            f"{_money(total_gross):.2f} € (Summe der Positionen, Rundungsdifferenz).")) if n)
     out["totalGrossAmount"] = _money(total_gross)
     out["totalTaxAmount"] = _money(total_tax)
     return out
