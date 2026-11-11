@@ -435,9 +435,13 @@ def test_unknown_customer_name_becomes_one_off_address(client: LexwareClient) ->
 
 
 def test_austrian_postal_string() -> None:
-    out = prepare_document(None, {"kunde": "Huber GmbH, Ring 1, 1010 Wien",
+    out = prepare_document(None, {"kunde": "Huber GmbH, Ring 1, 1010 Wien, Österreich",
                                   "lineItems": [LINE]}, QUOTATION)
     assert out["address"]["zip"] == "1010" and out["address"]["city"] == "Wien"
+    assert out["address"]["countryCode"] == "AT"
+    with pytest.raises(LexwareError, match="4-stellig"):
+        prepare_document(None, {"kunde": "Huber GmbH, Ring 1, 1010 Wien",
+                                "lineItems": [LINE]}, QUOTATION)
 
 
 @respx.mock
@@ -490,3 +494,10 @@ def test_article_requires_tax_rate(client: LexwareClient) -> None:
 def test_huge_number_is_a_clear_error() -> None:
     with pytest.raises(LexwareError):
         prepare_document(None, {"lineItems": [{**LINE, "quantity": 1.5e300}]}, QUOTATION)
+
+
+def test_lieferdatum_prints_as_delivery_date() -> None:
+    out = prepare_document(None, {"lieferdatum": "20.11.2026", "lineItems": [LINE]}, INVOICE)
+    assert out["shippingConditions"]["shippingType"] == "delivery"
+    out = prepare_document(None, {"leistungsdatum": "20.11.2026", "lineItems": [LINE]}, INVOICE)
+    assert out["shippingConditions"]["shippingType"] == "service"

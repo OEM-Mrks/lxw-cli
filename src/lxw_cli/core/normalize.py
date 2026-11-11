@@ -435,6 +435,19 @@ _PERSON_KEYS = {
                 "tel": "phoneNumber", "mobil": "phoneNumber", "handy": "phoneNumber"}
 
 
+_ADDRESS_KEYS = {"strasse": "street", "straße": "street", "plz": "zip",
+                 "postleitzahl": "zip", "ort": "city", "stadt": "city", "land": "country",
+                 "zusatz": "supplement", "adresszusatz": "supplement"}
+
+
+def _address_keys(entry: dict[str, Any]) -> dict[str, Any]:
+    out = dict(entry)
+    for alias, target in _ADDRESS_KEYS.items():
+        if alias in out and target not in out:
+            out[target] = out.pop(alias)
+    return out
+
+
 def _person_keys(person: dict[str, Any]) -> dict[str, Any]:
     """German/flat keys inside a person or contact person."""
     out = dict(person)
@@ -466,12 +479,25 @@ def _german_contact_fields(body: dict[str, Any]) -> dict[str, Any]:
     kunde: true …) → the structure Lexware expects."""
     if isinstance(body.get("company"), str):
         body["company"] = {"name": body["company"]}
+    for key in ("adresse", "anschrift", "address", "rechnungsadresse"):
+        if isinstance(body.get(key), dict):  # one address object → billing address
+            entry = _address_keys(body.pop(key))
+            addresses = dict(body.get("addresses") or {})
+            addresses["billing"] = [entry]
+            body["addresses"] = addresses
     for alias, target in _GERMAN_FLAT.items():
         if alias in body and target not in body:
             body[target] = body.pop(alias)
     for key in _COMPANY_NAME:
         if key in body:
             body["company"] = {**(body.get("company") or {}), "name": body.pop(key)}
+    for keys, target in ((("ustid", "ust_id", "ust-id", "ustidnr", "ust-idnr", "vat_id",
+                           "vatId", "umsatzsteuer_id", "vatRegistrationId"),
+                          "vatRegistrationId"),
+                         (("steuernummer", "tax_number", "taxNumber"), "taxNumber")):
+        for key in keys:
+            if key in body:
+                body["company"] = {**(body.get("company") or {}), target: body.pop(key)}
     person_bits = {_PERSON_FLAT[k]: body.pop(k) for k in list(body) if k in _PERSON_FLAT}
     contact_person = None
     for key in ("ansprechpartner", "contactPerson", "contact_person", "contactPersons",
@@ -576,6 +602,7 @@ def normalize_contact(body: dict[str, Any], *, partial: bool = False) -> dict[st
         for kind, entries in addresses.items():
             entries = _as_list(entries)
             if isinstance(entries, list):
+                entries = [_address_keys(e) if isinstance(e, dict) else e for e in entries]
                 entries = [
                     {**e, "countryCode": country_code(e.get("countryCode") or e.get("country"))}
                     if isinstance(e, dict) and (e.get("countryCode") or e.get("country"))
