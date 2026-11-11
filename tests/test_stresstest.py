@@ -258,7 +258,11 @@ def test_roles_list_of_objects_and_nan() -> None:
         with pytest.raises(LexwareError, match="endliche Zahl|muss eine Zahl"):
             to_decimal(bad, field="netPrice")
     assert str(to_decimal("100.-", field="x")) == "100"
-    assert str(to_decimal("2 Stück", field="x")) == "2"
+    # a unit next to a quantity is read by the line item (0.9.15: not by to_decimal)
+    from lxw_cli.core.prepare import _normalize_line
+
+    assert _normalize_line({"name": "A", "quantity": "2 Stück", "preis": 1}, "net")[
+        "quantity"] == 2
 
 
 def test_control_characters_removed() -> None:
@@ -309,10 +313,13 @@ def test_article_number_as_position_id(client: LexwareClient) -> None:
 
 
 def test_voucher_kind_words() -> None:
-    out = prepare_voucher({"type": "Quittung", "voucherNumber": "Q1", "betrag": "12,345",
+    out = prepare_voucher({"type": "Quittung", "voucherNumber": "Q1", "betrag": "12,3451",
                            "kategorie": "Porto"})
     assert out["type"] == "purchaseinvoice"
     assert out["voucherItems"][0]["amount"] == 12.35
+    with pytest.raises(LexwareError, match="mehrdeutig"):  # 0.9.15: 12,345 = 12345?
+        prepare_voucher({"type": "Quittung", "voucherNumber": "Q1", "betrag": "12,345",
+                         "kategorie": "Porto"})
     with pytest.raises(LexwareError, match="Unbekannte Belegart 'Spende'"):
         prepare_voucher({"type": "Spende", "voucherNumber": "Q1"})
 

@@ -824,8 +824,8 @@ def list_invoices(
     include_archived: archived invoices are excluded by default; set True to
         include them (filtered server-side).
     limit: max results to return; set to 0 to fetch all (paginates internally).
-    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
-        e.g. for the revenue of a month.
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'; a
+        month like 'November 2026' or '2026-11' = its first resp. last day).
     """
     return services.list_invoices(
         _client_get(),
@@ -857,7 +857,9 @@ def get_payment_status(identifier: str) -> dict[str, Any]:
     """Show whether an invoice is paid and how much is still open.
 
     Use this to answer "is invoice X paid?" / "what's still open on X?".
-    Accepts a voucher number (e.g. 'FB2600682', also just its digits) or id.
+    Accepts a voucher number (e.g. 'FB2600682', also just its digits or with
+    the type word, 'Rechnung 1') or id. A dunning has no payment status of its
+    own — the result points to its invoice.
     Works for invoices, down payment invoices, bookkeeping vouchers and
     Rechnungskorrekturen (credit notes). Returns the still-open amount, the
     payment state (open / paid off / balanced / voided), the date it was paid
@@ -939,14 +941,15 @@ def list_vouchers(
         orderconfirmation, quotation, deliverynote, any. German words work too
         (Rechnung, Gutschrift, Angebot, Auftrag, Lieferschein, Eingangsrechnung).
         Default: ALL types.
-    voucher_status: comma-separated, e.g. 'open,paid' (default: all).
-        German or English words work (offen/open, bezahlt/paid, überfällig/overdue,
-        Entwurf/draft, storniert/voided, angenommen/accepted, abgelehnt/rejected).
+    voucher_status: comma-separated, e.g. 'open,paid' (default: all, incl. 'zu
+        prüfen'/unchecked). German or English words work (offen/open, bezahlt/paid,
+        überfällig/overdue, Entwurf/draft, storniert/voided, angenommen/accepted,
+        abgelehnt/rejected, zu prüfen/unchecked).
     voucher_number: finds the voucher whatever its type ('6' → RE0006).
     Archived vouchers are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all (paginates internally).
-    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
-        e.g. for the revenue of a month.
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'; a
+        month like 'November 2026' or '2026-11' = its first resp. last day).
     """
     return services.list_vouchers(
         _client_get(),
@@ -965,7 +968,9 @@ def list_vouchers(
 def get_voucher(identifier: str) -> dict[str, Any]:
     """Get a voucher's details by UUID or voucher number. Searches all voucher types
     (bookkeeping vouchers, invoices, down payment invoices, credit notes,
-    quotations, order confirmations, delivery notes).
+    quotations, order confirmations, delivery notes; a dunning number like
+    'RE0003_1' is recognised too). A type word narrows the search: 'Rechnung 1'
+    = RE0001, 'Angebot 109', 'Eingangsrechnung 4711' / 'ER 4711'.
 
     The only parameter is `identifier` (voucher number or id) — there is no
     `voucher_id`, `id` or `number` parameter.
@@ -1062,8 +1067,8 @@ def list_quotations(
     contact_id: filter by customer UUID.
     Archived quotations are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all quotations (paginates internally).
-    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
-        e.g. for the revenue of a month.
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'; a
+        month like 'November 2026' or '2026-11' = its first resp. last day).
     """
     return services.list_quotations(
         _client_get(),
@@ -1117,8 +1122,8 @@ def list_order_confirmations(
     contact_id: filter by customer UUID.
     Archived orders are excluded by default; set include_archived=True to
     include them. Set limit=0 to fetch all (paginates internally).
-    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
-        e.g. for the revenue of a month.
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'; a
+        month like 'November 2026' or '2026-11' = its first resp. last day).
     """
     return services.list_order_confirmations(
         _client_get(),
@@ -1175,8 +1180,8 @@ def list_delivery_notes(
     contact_id: filter by customer UUID.
     Archived delivery notes are excluded by default; set include_archived=True
     to include them. Set limit=0 to fetch all (paginates internally).
-    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'),
-        e.g. for the revenue of a month.
+    date_from / date_to: Belegdatum von/bis (e.g. '01.10.2026', '2026-10-31'; a
+        month like 'November 2026' or '2026-11' = its first resp. last day).
     """
     return services.list_delivery_notes(
         _client_get(),
@@ -1255,6 +1260,10 @@ def create_invoice_draft(body: dict[str, Any]) -> dict[str, Any]:
     `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
     days. Line item type `custom` = free position with name and unitPrice;
     `material`/`service` only with the article's `id`.
+    Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
+    steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
+    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
+    text ("+5%", "30 min") is refused instead of guessed.
     """
     return services.create_invoice(_client_get(), body)
 
@@ -1265,6 +1274,12 @@ def create_contact(body: dict[str, Any]) -> dict[str, Any]:
 
     Minimal body example:
     {"roles": {"customer": {}}, "company": {"name": "Acme GmbH"}}
+    Flat fields work too: {"name": "Acme GmbH", "adresse": "Ring 1, 50667 Köln",
+    "email": …, "ansprechpartner": {"vorname": …, "nachname": …}}. For a private
+    person give `typ: "privat"` ("firma" for a company) — a name that looks like
+    a person is asked back, because the kind cannot be changed later. A contact
+    with the same name (ä = ae) is NOT created twice; set `"allow_duplicate":
+    true` in the body if a second one is really wanted.
     Längenlimits: Notiz `note` max. 1000 Zeichen; Anrede `salutation` max. 25.
     """
     return services.create_contact(_client_get(), body)
@@ -1284,6 +1299,11 @@ def update_contact(contact_id: str, changes: dict[str, Any]) -> dict[str, Any]:
       change business mail:{"emailAddresses": {"business": ["neu@example.com"]}}
       change billing addr: {"addresses": {"billing": [{"street": "Weg 1",
                             "zip": "50667", "city": "Köln", "countryCode": "DE"}]}}
+      part of an address:  {"lieferadresse": {"city": "Leverkusen", "zip": "51373"}}
+                           (billing and shipping keep their other fields)
+      contact person:      {"ansprechpartner": {"telefon": "…"}} merges into the
+                           existing one; another name REPLACES it (Lexware keeps
+                           only one — the result's `hinweis` says so).
     Note: `archived` is read-only in the Lexware API — a request to archive or
     un-archive a contact is refused with a clear message (only possible in
     the Lexware web app); nothing is changed then.
@@ -1303,8 +1323,11 @@ def create_voucher_draft(
     attach the original document (PDF/JPG/PNG).
 
     Note: Lexware books it right away with status 'open' (there is no draft
-    state for bookkeeping vouchers). `type` may be German (Eingangsrechnung,
-    Ausgangsrechnung, Gutschrift); `categoryId` may be the category's name;
+    state for bookkeeping vouchers; 'paid' cannot be set — payments are matched
+    in Lexware). `type` may be German (Eingangsrechnung, Quittung,
+    Ausgangsrechnung, Gutschrift — with a supplier or an expense category a
+    supplier's credit note); `categoryId` may be the category's name (or set
+    once for all items); `netto`/`brutto` per item set taxType;
     dates as TT.MM.JJJJ work; without contactId the collective contact is
     used. The same number with the same contact and amount is not booked twice
     — the existing voucher is returned with a `hinweis`.
@@ -1611,6 +1634,10 @@ def create_quotation_draft(body: dict[str, Any]) -> dict[str, Any]:
     `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
     days. Line item type `custom` = free position with name and unitPrice;
     `material`/`service` only with the article's `id`.
+    Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
+    steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
+    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
+    text ("+5%", "30 min") is refused instead of guessed.
     """
     return services.create_quotation(_client_get(), body)
 
@@ -1633,6 +1660,10 @@ def create_order_confirmation_draft(body: dict[str, Any]) -> dict[str, Any]:
     `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
     days. Line item type `custom` = free position with name and unitPrice;
     `material`/`service` only with the article's `id`.
+    Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
+    steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
+    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
+    text ("+5%", "30 min") is refused instead of guessed.
     """
     return services.create_order_confirmation(_client_get(), body)
 
@@ -1664,8 +1695,17 @@ def continue_document(
         Reklamation", "quantity": 1, "unitPrice": {"netAmount": 42.02,
         "taxRatePercentage": 19}}]}. Without lineItems a credit note covers
         the WHOLE invoice (= Storno).
+    `changes` positions are completed like on create (article by number/name,
+        German field names, price as text); payment terms, Skonto or discount
+        for a delivery note or dunning are refused (they have none). A new
+        zahlungsziel keeps the source's Skonto (`skonto: 0` removes it);
+        `rabatt` switches between % and € (`rabatt: 0` removes it).
     `allow_duplicate`: a second follow-up of the same type (e.g. a second
-        invoice from one order) is refused unless this is true.
+        invoice from one order, also one next to it in the chain) is refused
+        unless this is true. Credit notes: several PARTIAL ones (with
+        lineItems) are fine, the result names the existing ones; a FULL one
+        when credit notes already exist needs allow_duplicate. A further
+        dunning while a dunning draft exists needs allow_duplicate too.
     Notes: an order or delivery note must be finalized in Lexware before it
     can be continued; a quotation draft is finalized by Lexware on the way.
     Quotations with optional/alternative positions cannot be continued via
@@ -1684,8 +1724,11 @@ def create_dunning(identifier: str) -> dict[str, Any]:
     customer name instead, the customer's overdue invoices are listed. The
     invoice must be finalized and still open — otherwise the reason is
     reported. The dunning is a draft linked to the invoice; each further one
-    is the next level (titled e.g. "2. Mahnung"). Later retrieval works with
-    the dunning's id, its number (e.g. 'RE0001_2') or the invoice number.
+    is the next level (titled e.g. "2. Mahnung", counted from finished
+    dunnings). While a dunning DRAFT exists no new one is created (finish or
+    delete it in Lexware). The result carries the dunning number (e.g.
+    'RE0001_2'); later retrieval works with the dunning's id, that number or
+    the invoice number.
     """
     return services.create_dunning(_client_get(), identifier)
 
@@ -1708,6 +1751,10 @@ def create_delivery_note_draft(body: dict[str, Any]) -> dict[str, Any]:
     `taxRatePercentage` 19 (0 for tax-free types); quotations expire after 30
     days. Line item type `custom` = free position with name and unitPrice;
     `material`/`service` only with the article's `id`.
+    Free texts work: zahlungsziel "14 Tage 2 % Skonto, 30 Tage netto",
+    steuerart "innergemeinschaftliche Lieferung"/"Ausfuhr"/"Kleinunternehmer",
+    steuersatz "ermäßigt" (7) / "voll" (19). A price or quantity with extra
+    text ("+5%", "30 min") is refused instead of guessed.
     """
     return services.create_delivery_note(_client_get(), body)
 

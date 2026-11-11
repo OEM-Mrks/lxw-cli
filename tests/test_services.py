@@ -282,8 +282,14 @@ def test_create_order_confirmation_posts_body(client: LexwareClient) -> None:
     route = respx.post("https://api.lexware.io/v1/order-confirmations").mock(
         return_value=httpx.Response(201, json={"id": "new-order"})
     )
+    # 0.9.15: without a customer the server asks instead of sending it to Lexware
+    with pytest.raises(LexwareError, match="Bitte einen Kunden angeben"):
+        services.create_order_confirmation(
+            client, {"lineItems": [{"type": "custom", "name": "X",
+                                    "unitPrice": {"netAmount": 1}}]})
     result = services.create_order_confirmation(
-        client, {"lineItems": [{"type": "custom", "name": "X", "unitPrice": {"netAmount": 1}}]}
+        client, {"address": {"name": "Barverkauf"},
+                 "lineItems": [{"type": "custom", "name": "X", "unitPrice": {"netAmount": 1}}]}
     )
     assert result == {"id": "new-order"}
     assert route.called

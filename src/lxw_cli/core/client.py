@@ -357,7 +357,26 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
     (re.compile(r"preceding sales voucher must be open[^.\n]*\.?", re.I),
      "Der Ausgangsbeleg muss offen sein (nicht bezahlt, storniert oder ein Entwurf)."),
     (re.compile(r"Name and countryCode are required address fields\.?", re.I),
-     "Für eine Adresse ohne Kontakt sind Name und Ländercode (z. B. DE) Pflicht."),
+     "Sobald einzelne Adressfelder angegeben sind, braucht die Adresse Name und Ländercode "
+     "(z. B. DE) – für einen Stammkunden nur die Kontakt-id (contactId) angeben."),
+    (re.compile(r"Referenced contact needs to have role customer\.?", re.I),
+     "Der gewählte Kontakt ist kein Kunde – bitte einen Kunden wählen oder in Lexware die "
+     "Kunden-Rolle ergänzen."),
+    (re.compile(r"Referenced contact is required for tax type '?(\w+)'?\.?", re.I),
+     r"Für die Steuerart \1 muss der Beleg an einen Kontakt gehen (kunde bzw. contactId), "
+     r"nicht an eine Einmaladresse."),
+    (re.compile(r"due date (?:must not be |is )?before (?:the )?voucher date\.?", re.I),
+     "Die Fälligkeit liegt vor dem Belegdatum – bitte ein späteres Datum angeben."),
+    (re.compile(r"Invalid value '([^']*)' for '([^']+)'\. Value of type Boolean expected\.?"),
+     r"„\2“ braucht ja/nein (true/false), erhalten: '\1'."),
+    (re.compile(r"Value of type Boolean expected\.?", re.I),
+     "Hier wird ja/nein (true/false) erwartet."),
+    (re.compile(r"vat ?registration ?id[^.\n]*unknown country ?code\.?", re.I),
+     "Die USt-IdNr. beginnt nicht mit einem gültigen Ländercode (z. B. DE123456789, "
+     "ATU12345678)."),
+    (re.compile(r"The total discount has to be either absolute or percentage but not both\.?",
+                re.I),
+     "Gesamtrabatt bitte entweder in Prozent ODER als Betrag angeben, nicht beides."),
     (re.compile(r"mimetype mismatch", re.I),
      "Dateiinhalt passt nicht zur Dateiendung (z. B. Text unter .pdf) – bitte die "
      "Originaldatei hochladen"),
@@ -379,6 +398,11 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
         re.compile(r"Feld „(?:company\.)?contactPersons\.size“: invalid value", re.I),
         "Nur ein Ansprechpartner pro Firmenkontakt (Grenze der Lexware-API)",
     ),
+    (re.compile(r"Feld „([^“]+)\.size“: invalid value", re.I),
+     r"„\1“: Lexware erlaubt hier nur einen Eintrag"),
+    (re.compile(r"(?:^|(?<=\s))([\w.]+)\.size: (?:size must be between \d+ and 1|"
+                r"invalid value)", re.I),
+     r"„\1“: Lexware erlaubt hier nur einen Eintrag"),
     (re.compile(r"countrycode is not valid", re.I),
      "Ländercode ungültig – bitte ISO-Code wie DE, AT, CH"),
     (re.compile(r"invalid email", re.I), "ungültige E-Mail-Adresse"),
@@ -397,8 +421,9 @@ _TRANSLATIONS: tuple[tuple[re.Pattern[str], Any], ...] = (
      "Beträge im Buchhaltungsbeleg müssen positiv sein (Gutschriften als eigene Belegart)"),
     (re.compile(r"NO_SOURCE:\s*"), ""),
     (re.compile(r"Invalid combination of tax type[^.\n]*\.?", re.I),
-     "Diese Steuerart passt nicht zu Kontakt, Land oder Positionen (z. B. §13b nur mit "
-     "Unternehmer-Kunde und Steuersatz 0 %). Bitte Steuerart bzw. Steuersätze prüfen."),
+     lambda m: "Diese Steuerart passt nicht zu Kontakt, Land oder Positionen (z. B. §13b nur "
+     "mit Unternehmer-Kunde und Steuersatz 0 %). Bitte Steuerart bzw. Steuersätze prüfen. "
+     f"(Lexware: „{m.group(0).strip()}“)"),
     (re.compile(r"Line items in vatfree invoices must not contain taxes\.?", re.I),
      "Bei steuerfreien Belegen (z. B. innergemeinschaftliche Lieferung) muss der "
      "Steuersatz jeder Position 0 % sein."),
@@ -500,6 +525,21 @@ _ISSUE_TEXTS = {
 }
 
 
+_INDEX_RE = re.compile(r"^(lineItems|voucherItems)\[(\d+)\]\.?(.*)$")
+
+
+def human_field(path: str) -> str:
+    """"lineItems[2].unitPrice.netAmount" → "Position 3 (unitPrice.netAmount)"."""
+    m = _INDEX_RE.match(path.strip())
+    if not m:
+        return path
+    rest = m.group(3)
+    friendly = _FRIENDLY_FIELDS.get(f"{m.group(1)}.{rest}") if rest else None
+    position = f"Position {int(m.group(2)) + 1}"
+    return f"{position}: {friendly}" if friendly else (
+        f"{position} ({rest})" if rest else position)
+
+
 def _format_issue_list(issues: object) -> str | None:
     if not isinstance(issues, list):
         return None
@@ -513,7 +553,7 @@ def _format_issue_list(issues: object) -> str | None:
         if not text:
             text = key.replace("_", " ") or "ungültige Angabe"
             if source:
-                text = f"Feld „{source}“: {text}"
+                text = f"Feld „{human_field(source)}“: {text}"
         if text not in parts:
             parts.append(text)
     return " ".join(parts) or None
@@ -561,7 +601,8 @@ def _format_validation_details(details: object) -> str | None:
             continue
         raw_field = str(entry.get("field") or "").strip()
         message = str(entry.get("message") or "").strip()
-        label = _FRIENDLY_FIELDS.get(re.sub(r"\[\d+\]", "", raw_field), raw_field)
+        label = human_field(raw_field) if _INDEX_RE.match(raw_field) else (
+            _FRIENDLY_FIELDS.get(re.sub(r"\[\d+\]", "", raw_field), raw_field))
         size_match = _SIZE_HINT_RE.search(message)
         if size_match:
             limit = next(g for g in size_match.groups() if g)
