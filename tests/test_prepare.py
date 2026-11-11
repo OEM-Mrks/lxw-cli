@@ -102,8 +102,12 @@ def test_given_values_are_kept_and_input_not_mutated() -> None:
 
 
 def test_missing_voucher_date_defaults_to_now() -> None:
+    from lxw_cli.core.prepare import _now
+
     out = prepare_document(None, _quotation(), QUOTATION)
-    assert datetime.fromisoformat(out["voucherDate"]).date() == datetime.now().date()
+    # Compare with the server's own clock (Europe/Berlin), not the runner's
+    # local time: between 23:00 and 24:00 UTC the two dates differ.
+    assert datetime.fromisoformat(out["voucherDate"]).date() == _now().date()
 
 
 def test_tax_free_type_defaults_rate_to_zero() -> None:
