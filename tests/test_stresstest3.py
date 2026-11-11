@@ -1071,7 +1071,9 @@ def test_review_m1_companies_are_not_asked_back() -> None:
     for name in ("Peter Lang", "Lang, Peter", "Claire Dubois"):
         with pytest.raises(LexwareError, match="Firma oder eine Privatperson"):
             normalize_contact({"name": name})
-    assert normalize_contact({"name": "Dr. Peter Lang"})["person"]["lastName"] == "Lang"
+    # Round 2 (N1): a title alone is asked back, only Herr/Frau make a person
+    with pytest.raises(LexwareError, match="Firma oder eine Privatperson"):
+        normalize_contact({"name": "Dr. Peter Lang"})
     assert normalize_contact({"name": "Lang, Peter", "typ": "privat"})["person"] == {
         "lastName": "Lang", "firstName": "Peter"}
 
@@ -1086,9 +1088,11 @@ def test_review_m2_any_single_unit_word(client: LexwareClient) -> None:
     assert line("5 Rollen")["unitName"] == "Rollen"
     assert line("1000 Etiketten", einheit="Etikett")["quantity"] == 1000
     assert line("10 Kartons", einheit="Karton")["unitName"] == "Karton"
-    assert line("10 Stück", einheit="Rolle")["quantity"] == 10
+    # Round 2 (N6): a unit word must fit the position's unit
+    with pytest.raises(LexwareError, match="wie viele Rollen"):
+        line("10 Stück", einheit="Rolle")
     assert line("3 Std.", einheit="h")["quantity"] == 3
-    with pytest.raises(LexwareError, match="passt nicht zur Einheit"):
+    with pytest.raises(LexwareError, match="in 'kg' geführt"):
         line("500 g", einheit="kg")
     for bad in ("10 % mehr", "+5 Rollen"):
         with pytest.raises(LexwareError):
@@ -1234,3 +1238,141 @@ def test_review_l4_tax_type_words() -> None:
         assert out["lineItems"][0]["unitPrice"]["taxRatePercentage"] == 19
     with pytest.raises(LexwareError, match="Unbekannte Steuerart 'Sonderregel'"):
         _pay({"steuerart": "Sonderregel"})
+
+
+# == Review-Runde 2 zu 0.9.15 ================================================================
+
+
+def test_review2_grundsatz_own_texts_stay_word_for_word() -> None:
+    for label, days in (("Vorkasse, Versand nach Zahlungseingang", 7),
+                        ("Payable upon receipt, please quote invoice no.", 30),
+                        ("Zahlbar sofort nach Erhalt. Bankverbindung: IBAN DE12 3456", 14),
+                        ("Zahlbar per Überweisung", 14)):
+        out = _pay({"paymentConditions": {"paymentTermLabel": label,
+                                          "paymentTermDuration": days}})
+        assert out["paymentConditions"] == {"paymentTermLabel": label,
+                                            "paymentTermDuration": days}
+    for bare in ("Vorkasse", "sofort", "Zahlbar sofort.", "zahlbar sofort, rein netto"):
+        out = _pay({"paymentConditions": {"paymentTermLabel": bare, "paymentTermDuration": 14}})
+        assert out["paymentConditions"]["paymentTermLabel"] == (
+            "Zahlbar innerhalb von 14 Tagen ohne Abzug")
+
+
+def test_review2_n2_long_sofort_text_only_a_hint() -> None:
+    out = _pay({"paymentConditions": {"paymentTermLabel": "Zahlbar sofort nach Erhalt. "
+                                      "Bankverbindung: IBAN DE12", "paymentTermDuration": 14}})
+    assert out["paymentConditions"]["paymentTermLabel"].startswith("Zahlbar sofort nach Erhalt")
+    assert "sagt „sofort“, die Frist ist aber 14 Tage" in out["__hinweis"]
+
+
+def test_review2_n3_copy_keeps_own_dated_text() -> None:
+    copy_of = {"id": "abc", "createdDate": "2026-10-01T10:00:00.000+02:00",
+               "voucherDate": "2026-10-01T00:00:00.000+02:00"}
+    for label in ("Zahlbar innerhalb 14 Tagen. Betriebsferien 23.12.2026 bis 02.01.2027.",
+                  "Bitte überweisen Sie bis 15.10.2026 auf IBAN DE12."):
+        out = _pay({**copy_of, "paymentConditions": {"paymentTermLabel": label,
+                                                     "paymentTermDuration": 14}})
+        assert out["paymentConditions"]["paymentTermLabel"] == label
+    for label in ("Zahlbar bis 15.10.2026", "Zahlbar bis 15.10.2026 ohne Abzug",
+                  "Payable by 15.10.2026 without deduction."):
+        out = _pay({**copy_of, "paymentConditions": {"paymentTermLabel": label,
+                                                     "paymentTermDuration": 14}})
+        assert out["paymentConditions"]["paymentTermLabel"] == (
+            "Zahlbar innerhalb von 14 Tagen ohne Abzug")
+
+
+def test_review2_n4_only_payment_days_contradict() -> None:
+    for label in ("Lieferung erfolgt 5 Tage nach Zahlungseingang.",
+                  "Zahlbar innerhalb von 14 Tagen. Reklamationen innerhalb von 8 Tagen.",
+                  "Für 3D-Druck gilt: Zahlung innerhalb 14 Tagen"):
+        out = _pay({"paymentConditions": {"paymentTermLabel": label, "paymentTermDuration": 14}})
+        assert out["paymentConditions"]["paymentTermLabel"] == label
+    out = _pay({"paymentConditions": {"paymentTermLabel": "3D-Druck: Zahlung per Vorkasse"}})
+    assert out["paymentConditions"]["paymentTermDuration"] == 0
+    with pytest.raises(LexwareError, match="nennt 14 Tage, die Frist ist 30"):
+        _pay({"paymentConditions": {"paymentTermLabel": "Zahlbar innerhalb von 14 Tagen. "
+                                    "Reklamationen innerhalb von 8 Tagen.",
+                                    "paymentTermDuration": 30}})
+
+
+def test_review2_n8a_skonto_text_without_term() -> None:
+    label = "Bei Zahlung innerhalb von 7 Tagen 2 % Skonto."
+    out = _pay({"paymentConditions": {"paymentTermLabel": label, "paymentTermDuration": 30}})
+    assert out["paymentConditions"] == {
+        "paymentTermLabel": label, "paymentTermDuration": 30,
+        "paymentDiscountConditions": {"discountPercentage": 2, "discountRange": 7}}
+    with pytest.raises(LexwareError, match="fehlt die Zahlungsfrist"):  # still: no term at all
+        _pay({"paymentConditions": {"paymentTermLabel": label}})
+
+
+def test_review2_n1_titles_and_salutations() -> None:
+    for name in ("Dr. Müller & Partner", "Dr. Lang Zahnarztpraxis"):
+        assert normalize_contact({"name": name})["company"]["name"] == name
+    for name in ("Dr. Oetker", "Prof. Dr. Schmidt"):
+        with pytest.raises(LexwareError, match="Firma oder eine Privatperson"):
+            normalize_contact({"name": name})
+    assert normalize_contact({"name": "Herr Dr. Peter Schmidt"})["person"] == {
+        "salutation": "Herr Dr.", "firstName": "Peter", "lastName": "Schmidt"}
+    assert normalize_contact({"name": "Dr. Oetker", "typ": "privat"})["person"] == {
+        "salutation": "Dr.", "lastName": "Oetker"}
+    assert normalize_contact({"name": "Mrs Jane Doe"})["person"]["salutation"] == "Mrs."
+
+
+@respx.mock
+def test_review2_n5_short_name_only_without_legal_form(client: LexwareClient) -> None:
+    coal = {**CONTACT, "id": U2, "company": {"name": "Coal Control GmbH & Co. KG"}}
+    bau = {**CONTACT, "id": U3, "company": {"name": "Müller Bau GmbH"}}
+    respx.get(f"{API}/contacts/{U2}").mock(return_value=ok(coal))
+    respx.get(f"{API}/contacts/{U3}").mock(return_value=ok(bau))
+    post = respx.post(f"{API}/invoices").mock(return_value=ok({"id": U4}))
+    respx.get(f"{API}/invoices/{U4}").mock(return_value=ok({}))
+    services.create_invoice(client, {"address": {"contactId": U2, "name": "Coal Control"},
+                                     "lineItems": [LINE]})
+    assert sent(post)["address"]["name"] == "Coal Control GmbH & Co. KG"
+    for part in ("Müller", "Bau", "GmbH"):
+        with pytest.raises(LexwareError, match="passt nicht zum Kontakt Müller Bau GmbH"):
+            services.create_invoice(client, {"address": {"contactId": U3, "name": part},
+                                             "lineItems": [LINE]})
+
+
+@respx.mock
+def test_review2_n7_same_last_name_is_merged(client: LexwareClient) -> None:
+    current = {**CONTACT, "company": {"name": "Lang GmbH", "contactPersons": [
+        {"salutation": "Herr", "firstName": "Peter", "lastName": "Lang", "primary": True,
+         "emailAddress": "peter@lang.de", "phoneNumber": "0231 1"}]}}
+    put = _contact_routes(current)
+    for index, change in enumerate(({"nachname": "Lang", "email": "neu@lang.de"},
+                                    {"vorname": "Peter", "telefon": "0231 999"},
+                                    {"anrede": "Herr", "nachname": "Lang"}, "Herr Lang")):
+        services.update_contact(client, U2, {"ansprechpartner": change})
+        person = sent(put, index)["company"]["contactPersons"][0]
+        assert person["firstName"] == "Peter" and person["salutation"] == "Herr"
+    assert sent(put, 0)["company"]["contactPersons"][0]["emailAddress"] == "neu@lang.de"
+    assert sent(put, 1)["company"]["contactPersons"][0]["phoneNumber"] == "0231 999"
+    assert sent(put, 1)["company"]["contactPersons"][0]["emailAddress"] == "peter@lang.de"
+    result = services.update_contact(client, U2, {"ansprechpartner": "Frau Lang"})
+    assert "wurde durch Frau Lang ersetzt" in result["hinweis"]
+    assert "firstName" not in sent(put, 4)["company"]["contactPersons"][0]
+
+
+@respx.mock
+def test_review2_n6_unit_word_must_fit(client: LexwareClient) -> None:
+    respx.get(f"{API}/articles/{U1}").mock(return_value=ok({**ARTICLE, "unitName": "Rolle"}))
+    for qty in ("1000 Etiketten", "10 Stück"):
+        with pytest.raises(LexwareError, match="der Artikel wird in 'Rolle' geführt – wie "
+                                               "viele Rollen"):
+            prepare_document(client, {"lineItems": [{"id": U1, "menge": qty}]}, INVOICE)
+    out = prepare_document(client, {"lineItems": [{"id": U1, "menge": "5 Rollen"}]}, INVOICE)
+    assert out["lineItems"][0]["quantity"] == 5
+
+    def line(qty: str, unit: str | None = None) -> dict:
+        item = {"name": "A", "preis": 1, "menge": qty, **({"einheit": unit} if unit else {})}
+        return prepare_document(None, {"lineItems": [item]}, INVOICE)["lineItems"][0]
+
+    with pytest.raises(LexwareError, match="in 'Stück' geführt"):
+        line("3 Stunden", "Stück")
+    for qty, unit in (("3 Kartons", "Karton"), ("2 Seiten", "Seite"), ("2 Stk.", "Stück"),
+                      ("4 Std.", "Stunde"), ("3 m", "Meter"), ("2 l", "Liter"),
+                      ("1 Pauschale", "pauschal"), ("2 Pakete", "Paket"), ("3 Tage", "Tag")):
+        assert line(qty, unit)["unitName"] == unit
+    assert line("1000 Etiketten")["unitName"] == "Etiketten"

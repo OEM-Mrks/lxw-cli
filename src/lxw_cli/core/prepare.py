@@ -454,7 +454,7 @@ def _days(value: Any) -> Any:
 
 
 _TERM_DAYS_RE = re.compile(
-    r"(\d+)\s*(?:kalender|werk)?(?:tag\w*|days?|d)\b"
+    r"(\d+)\s*(?:kalender|werk)?(?:tag\w*|days?)\b|(\d+)\s?d\b(?![-\w])"
     r"|(\d+)\s*(?:woche\w*|weeks?)\b"
     r"|\b(?:netto|net)\s+(\d+)\b(?!\s*%)", re.I)
 _TERM_PCT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:%|prozent|percent)", re.I)
@@ -470,6 +470,14 @@ _TERM_ZERO_RE = re.compile(
     r"nach\s+erhalt|upon\s+receipt|on\s+receipt|bar\s+bei|barzahlung|nachnahme)\b", re.I)
 _NET_MARK_RE = re.compile(r"\b(?:netto|net|ohne\s+abzug|rein\s+netto|without\s+deduction)\b",
                           re.I)
+# A clause about paying: only there a day count in the caller's own text is a
+# term ("Lieferung erfolgt 5 Tage nach Zahlungseingang" is none).
+_PAY_CONTEXT_RE = re.compile(
+    r"\b(?:zahlbar|zahlungsziel|zahlungsfrist|zahlung\s+(?:innerhalb|binnen|bis)|"
+    r"überweis\w*|ueberweis\w*|begleich\w*|bezahl\w*|zu\s+zahlen|fällig\w*|faellig\w*|"
+    r"netto|net|ohne\s+abzug|skonto|payable|payment|pay|due|discount)\b", re.I)
+# The bare "sofort" texts that may be rebuilt from a given term.
+_BARE_ZERO_RE = re.compile(r"(?:vorkasse|sofort|zahlbar sofort(?:,? rein netto)?)\.?", re.I)
 
 
 @dataclass
@@ -491,10 +499,10 @@ def _term_days(clause: str) -> list[tuple[int, int]]:
     """(days, position) of every day count ("14 Tage", "2 Wochen", "netto 30")."""
     out = []
     for m in _TERM_DAYS_RE.finditer(clause):
-        if m.group(2):
-            out.append((int(m.group(2)) * 7, m.start()))
+        if m.group(3):
+            out.append((int(m.group(3)) * 7, m.start()))
         else:
-            out.append((int(m.group(1) or m.group(3)), m.start()))
+            out.append((int(m.group(1) or m.group(2) or m.group(4)), m.start()))
     return out
 
 
@@ -522,8 +530,12 @@ def parse_terms(text: str, start: date | None, *, strict: bool = True) -> _Terms
     skonto_days: list[int] = []
     other: list[tuple[int, bool]] = []  # (days, next to a net word)
     counted = False
-    for clause in _clauses(raw):
+    clauses = _clauses(raw)
+    for clause in clauses:
         found = _term_days(clause)
+        if not strict and not _PAY_CONTEXT_RE.search(clause) and not re.fullmatch(
+                r"\s*\d+\s*(?:tage?n?|days?)\s*\.?\s*", clause, re.I):
+            continue  # "Reklamationen innerhalb von 8 Tagen" is no payment term
         counted = counted or bool(found)
         m = _TERM_PCT_RE.search(clause)
         until = _TERM_UNTIL_RE.search(clause)
@@ -587,10 +599,10 @@ def parse_terms(text: str, start: date | None, *, strict: bool = True) -> _Terms
         if len(set(skonto_days)) != 1:
             problem = (f"Zahlungsbedingung '{raw}': Skonto braucht genau eine Frist, z. B. „2 % "
                        "Skonto bei Zahlung innerhalb von 10 Tagen, 30 Tage netto“.")
-        elif terms.days is None:
+        elif terms.days is None and strict:
             problem = (f"Zahlungsbedingung '{raw}': Neben dem Skonto fehlt die Zahlungsfrist – "
                        "bitte z. B. „…, 30 Tage netto“ ergänzen.")
-        elif skonto_days[0] >= terms.days:
+        elif terms.days is not None and skonto_days[0] >= terms.days:
             problem = (f"Zahlungsbedingung '{raw}' ist nicht eindeutig: Die Skontofrist "
                        f"({skonto_days[0]} Tage) muss kürzer sein als die Zahlungsfrist "
                        f"({terms.days} Tage).")
@@ -620,8 +632,10 @@ _STANDARD_LABELS: tuple[tuple[re.Pattern[str], str, Any], ...] = (
     (re.compile(r"Zahlbar innerhalb von (\d+) Tagen\. Bei Zahlung innerhalb von (\d+) Tagen "
                 r"(\d+(?:[.,]\d+)?) ?% Skonto\.?"), "de",
      lambda m: (int(m[1]), _disc(m[3], m[2]), None)),
-    (re.compile(r"Zahlbar bis (\d{2}\.\d{2}\.\d{4}) ohne Abzug\.?"), "de",
+    (re.compile(r"Zahlbar bis (\d{2}\.\d{2}\.\d{4})(?: ohne Abzug)?\.?"), "de",
      lambda m: (None, None, m[1])),
+    (re.compile(r"Payable by (\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})(?: without "
+                r"deduction)?\.?"), "en", lambda m: (None, None, m[1])),
     (re.compile(r"(\d+) Tage -\s?(\d+(?:[.,]\d+)?) ?%, (\d+) Tage netto\.?"), "de",
      lambda m: (int(m[3]), _disc(m[2], m[1]), None)),
     (re.compile(r"Payable immediately without deduction\.?"), "en", lambda m: (0, None, None)),
@@ -974,6 +988,8 @@ def _payment(
     label_days: int | None = None
     label_disc: dict[str, Any] | None = None
     regenerate = label is None
+    label_zero = False
+    until = None
     if label:
         std = standard_label(label)
         if std:
@@ -986,30 +1002,39 @@ def _payment(
                 regenerate = True  # a German standard text on an English document
         else:
             terms = parse_terms(label, start, strict=False)
-            kind = "zero" if terms.zero else "own"
+            # only the bare short forms ("Vorkasse", "Zahlbar sofort") are rebuilt;
+            # a longer text saying "sofort" is the caller's own and stays
+            kind = "zero" if _BARE_ZERO_RE.fullmatch(re.sub(r"\s+", " ", label)) else "own"
+            label_zero = terms.zero
             label_days, label_disc = terms.days, terms.discount
             no_skonto = no_skonto or terms.no_skonto
             if terms.skonto_unread and not discounts:
                 notes.append(f"Das Skonto im Zahlungstext „{label}“ wurde nicht als "
                              "Skonto-Bedingung übernommen – dafür skonto angeben (z. B. "
                              "„2 % 7 Tage“).")
-    if label and is_copy and _DATE_IN_TEXT_RE.search(label) and days is not None:
-        # the dates in the text belong to the document that was read
+    if kind == "standard" and until and is_copy and days is not None:
+        # "Zahlbar bis <Datum>" of the document that was read: the date is old
         regenerate = True
-        notes.append(f"Der Zahlungstext „{label}“ nannte Daten des alten Belegs – neu "
+        notes.append(f"Der Zahlungstext „{label}“ nannte das Datum des alten Belegs – neu "
                      f"gebildet aus der Frist ({days} Tage).")
     elif label and days is None:
         days = label_days
     elif label and label_days is not None and label_days != days:
-        if kind == "own":
+        if kind == "own" and label_zero:
+            notes.append(f"Hinweis: Der Zahlungstext „{label}“ sagt „sofort“, die Frist ist "
+                         f"aber {days} Tage.")
+        elif kind == "own":
             raise LexwareError(
                 f"Widersprüchliche Zahlungsfristen: Der Zahlungstext „{label}“ nennt "
                 f"{label_days} Tage, die Frist ist {days} Tage – bitte nur eines angeben."
             )
-        regenerate = True
+        else:
+            regenerate = True
         if kind == "zero":
             notes.append(f"Der Zahlungstext „{label}“ (sofort) passte nicht zur Frist "
                          f"{days} Tage – neu gebildet.")
+    if label_disc and days is not None and label_disc["discountRange"] >= days:
+        label_disc = None  # Skonto period not shorter than the term: not usable
     if label_disc:
         same = discounts and (float(discounts[0][1]["discountPercentage"]),
                               discounts[0][1]["discountRange"]) == (
@@ -1379,23 +1404,69 @@ def _quantity(item: dict[str, Any]) -> None:
     item["__qty_unit"] = (raw, m.group(2))
 
 
-def _finish_unit(item: dict[str, Any]) -> None:
-    """The word written next to the quantity, against the position's unit."""
+# Spellings of one unit (abbreviations, singular/plural) → one key.
+_UNIT_SAME: dict[str, str] = {}
+for _key, _words in (
+    ("stück", "stück stueck stk st stck x pcs pc piece pieces"),
+    ("stunde", "stunde stunden std h hr hrs hour hours"),
+    ("minute", "minute minuten min mins"),
+    ("sekunde", "sekunde sekunden s sek sec"),
+    ("tag", "tag tage tagen d day days"),
+    ("woche", "woche wochen week weeks"),
+    ("monat", "monat monate month months"),
+    ("meter", "meter m lfm"), ("km", "km kilometer"), ("cm", "cm zentimeter"),
+    ("mm", "mm millimeter"), ("liter", "liter l litre"), ("ml", "ml milliliter"),
+    ("kg", "kg kilo kilogramm"), ("g", "g gramm"), ("t", "t tonne tonnen"),
+    ("m2", "m2 m² qm quadratmeter"), ("m3", "m3 m³ kubikmeter cbm"),
+    ("pauschal", "pauschal pauschale psch pausch pauschalen"),
+    ("paket", "paket pakete pkg pck"), ("set", "set sets"),
+):
+    for _w in _words.split():
+        _UNIT_SAME[_w] = _key
+
+
+def _unit_key(word: Any) -> set[str]:
+    """Comparable forms of a unit word: table entry, else singular/plural stems."""
+    text = str(word or "").strip().casefold().rstrip(".")
+    if text in _UNIT_SAME:
+        return {_UNIT_SAME[text]}
+    forms = {text}
+    for ending in ("en", "es", "er", "n", "s", "e"):
+        if text.endswith(ending) and len(text) - len(ending) >= 3:
+            forms.add(text[: -len(ending)])
+    return forms
+
+
+def _plural(unit_name: str) -> str:
+    known = {"stück": "Stück", "stunde": "Stunden", "tag": "Tage", "rolle": "Rollen",
+             "karton": "Kartons", "etikett": "Etiketten", "seite": "Seiten",
+             "paket": "Pakete", "minute": "Minuten", "woche": "Wochen", "monat": "Monate"}
+    key = str(unit_name).strip().casefold().rstrip(".")
+    return known.get(key, unit_name + ("n" if key.endswith("e") else ""))
+
+
+def _finish_unit(item: dict[str, Any], *, article: bool = False) -> None:
+    """The word written next to the quantity, against the position's unit
+    (an article position: the article's unit)."""
     stash = item.pop("__qty_unit", None)
     if not stash:
         return
     raw, word = stash
     unit_name = item.get("unitName")
     if unit_name:
+        if _unit_key(word) & _unit_key(unit_name):
+            return
         have, said = _unit_of(unit_name), _unit_of(word)
-        if have and said and have[0] == said[0] and have[1] != said[1]:
-            example = (", z. B. 0,5 für eine halbe Stunde" if have[1] == "hour"
-                       and said[1] == "minute" else "")
+        if have and said and have[1] == "hour" and said[1] == "minute":
             raise LexwareError(
                 f"Menge '{raw}' passt nicht zur Einheit der Position ({unit_name}) – bitte die "
-                f"Menge in {unit_name} angeben{example}."
+                f"Menge in {unit_name} angeben, z. B. 0,5 für eine halbe Stunde."
             )
-        return
+        who = "der Artikel wird" if article else "die Position wird"
+        raise LexwareError(
+            f"Menge '{raw}': {who} in '{unit_name}' geführt – wie viele {_plural(unit_name)}? "
+            f"Bitte die Menge in {unit_name} angeben."
+        )
     if str(word).casefold().rstrip(".") in _PIECE_WORDS:
         return  # the default unit (Stück)
     said = _unit_of(word)
@@ -1611,7 +1682,8 @@ def _complete_lines(
                         article.get("price"), dict) else None
                     if rate is not None:
                         item["unitPrice"]["taxRatePercentage"] = rate
-        _finish_unit(item)
+        _finish_unit(item, article=item.get("type") in ("material", "service")
+                     and bool(item.get("id")))
         if item.get("type") == "text":
             continue
         item.setdefault("quantity", 1)

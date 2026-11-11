@@ -556,7 +556,10 @@ _PERSON_FLAT = {"vorname": "firstName", "first_name": "firstName", "firstname": 
                 "nachname": "lastName", "last_name": "lastName", "lastname": "lastName",
                 "anrede": "salutation"}
 _COMPANY_NAME = ("firma", "firmenname", "company_name", "companyName", "unternehmen")
-_PERSON_SALUTATION = re.compile(r"^(Herr|Frau|Hr\.|Fr\.)\s+", re.I)
+_PERSON_SALUTATION = re.compile(r"^(Herr|Frau|Hr\.|Fr\.|Mrs\.?|Mr\.?|Ms\.?)\s+", re.I)
+# Academic titles in front of a name: kept in the salutation, never in firstName.
+_NAME_TITLES = re.compile(r"^((?:Prof\.|Dr\.(?:\s?(?:med|rer\.\s?nat|phil|jur|ing)\.)?|"
+                          r"Dipl\.-\w+\.?|Mag\.)\s+)+", re.I)
 
 
 _PERSON_KEYS = {
@@ -593,11 +596,19 @@ def _person_from_text(text: str) -> dict[str, Any]:
     """"Frau Petra Klein" → {salutation: Frau, firstName: Petra, lastName: Klein}."""
     text = text.strip()
     person: dict[str, Any] = {}
+    salutation: list[str] = []
     m = _PERSON_SALUTATION.match(text)
     if m:
         word = m.group(1).rstrip(".").lower()
-        person["salutation"] = "Herr" if word.startswith("h") else "Frau"
+        salutation.append({"herr": "Herr", "hr": "Herr", "frau": "Frau", "fr": "Frau",
+                           "mr": "Mr.", "mrs": "Mrs.", "ms": "Ms."}.get(word, m.group(1)))
         text = text[m.end():]
+    t = _NAME_TITLES.match(text)
+    if t:
+        salutation.append(re.sub(r"\s+", " ", t.group(0).strip()))
+        text = text[t.end():]
+    if salutation:
+        person["salutation"] = " ".join(salutation)[:25]
     if text.count(",") == 1:  # "Lang, Peter"
         last, first = (p.strip() for p in text.split(","))
         if last:
@@ -953,12 +964,13 @@ _COMPANY_WORDS = re.compile(
     r"schule|gemeinde|stadt|klinik|apotheke|consulting|solutions|systems|media|design|"
     r"bau|technik|logistik|holding|immobilien|versicherung|bank|zentrum|center|markt|"
     r"vertrieb|team|und|and|söhne|soehne|gastro\w*|\w+(?:betrieb|haus|bau|technik|"
-    r"service|handel|werk|markt|zentrum|gesellschaft|agentur|studio|verlag))(?=$|[\s,.&+/-])",
+    r"service|handel|werk|markt|zentrum|gesellschaft|agentur|studio|verlag|praxis|"
+    r"b(?:ü|ue)ro|kanzlei))(?=$|[\s,.&+/-])",
     re.I,
 )
 _TITLES = re.compile(r"^(?:dr\.?|prof\.?|dipl\.?-?\w*\.?|ing\.?|mag\.?)$", re.I)
 # A salutation or title in front: certainly a person ("Dr. Peter Lang").
-PERSON_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Dr\.|Prof\.)\s+", re.I)
+PERSON_PREFIX = re.compile(r"^(?:Herr|Frau|Hr\.|Fr\.|Mrs\.?|Mr\.?|Ms\.?)\s+", re.I)
 # Common first names (German/European). Only a name starting with one of
 # them is asked back — "Müller Weber", "Coal Control" stay companies.
 FIRST_NAMES = frozenset("""
@@ -1000,10 +1012,13 @@ def _is_first_name(word: str) -> bool:
 
 
 def looks_like_person(name: str) -> bool:
-    """"Peter Lang", "Lang, Peter" yes; "Müller Weber", "Lang GmbH", "Acme" no."""
+    """"Peter Lang", "Lang, Peter", "Dr. Oetker" yes; "Müller Weber", "Lang GmbH",
+    "Dr. Müller & Partner", "Acme" no."""
     text = name.strip()
     if not text or re.search(r"\d|[&+@/]", text) or _COMPANY_WORDS.search(text):
         return False
+    if _NAME_TITLES.match(text):
+        return True  # "Dr. Oetker", "Prof. Dr. Schmidt": a person or a firm — ask
     if text.count(",") == 1:  # "Lang, Peter"
         last, first = (p.strip() for p in text.split(","))
         first_words = first.split()

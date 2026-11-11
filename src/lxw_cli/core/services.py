@@ -850,6 +850,26 @@ def _several_named(name: str, rows: list[dict[str, Any]]) -> str:
             + " – bitte die Kundennummer (oder id) angeben.")
 
 
+# Legal forms at the end of a company name ("Coal Control GmbH & Co. KG").
+_LEGAL_FORM_RE = re.compile(
+    r"(?:[\s,]+(?:gmbh\s*(?:&|und)\s*co\.?\s*kg(?:aa)?|gmbh|ggmbh|mbh|ag|kgaa|kg|ohg|"
+    r"ug(?:\s*\(haftungsbeschr(?:ä|ae)nkt\))?|e\.\s?k\.?|e\.\s?kfm\.?|e\.\s?kfr\.?|gbr|"
+    r"partg(?:\s?mbb)?|se|ltd\.?|limited|inc\.?|llc|plc|corp\.?|e\.\s?v\.?|ev|bv|nv|"
+    r"s\.?a\.?r\.?l\.?|sas|s\.?a\.?|co\.?\s*kg|&\s*co\.?))+\s*$", re.I)
+
+
+def _same_name(given: str, label: str) -> bool:
+    """The given name IS the contact's — exactly or without its legal form
+    ("Coal Control" for "Coal Control GmbH & Co. KG"); a part ("Müller", "Bau",
+    "GmbH" for "Müller Bau GmbH") is not."""
+    want = _loose(given)
+    if want == _loose(label):
+        return True
+    short = _loose(_LEGAL_FORM_RE.sub("", label.strip()))
+    plain = _loose(_LEGAL_FORM_RE.sub("", given.strip()))
+    return bool(short) and bool(plain) and plain == short
+
+
 def _complete_contact_address(
     client: LexwareClient, body: dict[str, Any], notes: list[str], *, check_name: bool = True
 ) -> None:
@@ -873,10 +893,9 @@ def _complete_contact_address(
         return
     label = _contact_label(contact)
     name = address.get("name")
-    given, have = _loose(str(name or "")), _loose(label)
-    # a short form of the contact's name ("Coal Control" for "Coal Control GmbH &
-    # Co. KG") is the same contact; only a really different name is asked back
-    if check_name and name and given not in have and have not in given:
+    if check_name and name and _same_name(str(name), label):
+        address["name"] = label  # the full name, also for "Coal Control"
+    elif check_name and name:
         raise LexwareError(
             f"Der Name '{name}' passt nicht zum Kontakt {_contact_brief(contact)}. Soll der "
             "Beleg an diesen Kontakt gehen (dann den Namen weglassen) oder an eine "
@@ -4116,14 +4135,12 @@ def _merge_contact_person(current: dict[str, Any], changes: dict[str, Any]) -> l
     salutation = new.get("salutation")
     same_salutation = not salutation or fold(str(salutation)) == fold(
         str(old.get("salutation") or ""))
-    if not first and not last:
-        same = same_salutation  # only contact data (e-mail, phone) changes
-    else:
-        # the same person only when BOTH names are given and equal — "Frau Lang"
-        # or "Anna Lang" next to "Herr Peter Lang" is someone else
-        same = bool(first and last) and same_salutation and fold(str(first)) == fold(
-            str(old.get("firstName") or "")) and fold(str(last)) == fold(
-            str(old.get("lastName") or ""))
+    # the same person when every name given matches and the salutation does not
+    # contradict ("Lang" or "Herr Lang" for Herr Peter Lang); another first name
+    # or salutation ("Frau Lang", "Anna Lang") is someone else
+    same = same_salutation and all(
+        not value or fold(str(value)) == fold(str(old.get(key) or ""))
+        for key, value in (("firstName", first), ("lastName", last)))
     if same:
         changes["company"]["contactPersons"] = [{**old, **new}]
         return []
