@@ -1456,14 +1456,17 @@ class ChatFile(TypedDict):
 
 # Hosts ChatGPT serves attached files from. Nothing else is fetched: the
 # server must not turn into a proxy for arbitrary URLs (SSRF). EU workspaces
-# get their files from OpenAI's Azure storage account — that one account is
-# listed by its full name, never the whole `blob.core.windows.net` (anyone
-# can host files there).
+# get their files from OpenAI's Azure storage accounts (one per region) —
+# each is listed by its full name, never the whole `blob.core.windows.net`
+# (anyone can host files there). A new region shows up in the log as
+# "Chat-Datei abgelehnt: Host '…'" and has to be added here.
 DEFAULT_CHAT_FILE_HOSTS = (
     "oaiusercontent.com",
     "openai.com",
     "chatgpt.com",
     "oaisdmntprnortheu.blob.core.windows.net",
+    "oaisdmntprdenmarkeast.blob.core.windows.net",
+    "oaisdmntprpolandcentral.blob.core.windows.net",
 )
 ENV_CHAT_FILE_HOSTS = "LXW_MCP_CHAT_FILE_HOSTS"
 CHAT_FILE_TIMEOUT = 30.0
