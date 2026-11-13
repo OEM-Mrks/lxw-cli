@@ -236,3 +236,39 @@ def test_access_denied_is_german(client: LexwareClient) -> None:
         client.post("/v1/vouchers", {})
     assert err.value.status_code == 403
     assert "Keine Berechtigung" in str(err.value) and "Tarif" in str(err.value)
+
+
+@respx.mock
+def test_insufficient_scope_403_is_german(client: LexwareClient) -> None:
+    """403 ohne `user_not_authorized` (z. B. Mahnung im Tarif ohne Mahnwesen)."""
+    uuid = "11111111-2222-3333-4444-555555555555"
+    respx.get(f"{BASE}/v1/dunnings/{uuid}").mock(return_value=httpx.Response(403, json={
+        "status": 403,
+        "error": "Forbidden",
+        "message": "Insufficient scope or user access rights for this resource.",
+    }))
+    with pytest.raises(LexwareAPIError) as err:
+        client.get(f"/v1/dunnings/{uuid}")
+    assert err.value.status_code == 403
+    text = str(err.value)
+    assert "Keine Berechtigung" in text and "Andere Aktionen funktionieren weiter" in text
+    assert "Insufficient" not in text
+    assert "nicht wiederholen" in text  # sonst fragt das Modell Beleg für Beleg erneut
+
+
+@respx.mock
+def test_insufficient_scope_403_plain_text_is_german(client: LexwareClient) -> None:
+    respx.get(f"{BASE}/v1/articles").mock(return_value=httpx.Response(
+        403, text="Insufficient scope or user access rights for this resource."))
+    with pytest.raises(LexwareAPIError) as err:
+        client.get("/v1/articles")
+    assert "Keine Berechtigung" in str(err.value)
+
+
+@respx.mock
+def test_other_403_text_is_kept(client: LexwareClient) -> None:
+    respx.get(f"{BASE}/v1/articles").mock(return_value=httpx.Response(
+        403, json={"message": "Organization is locked."}))
+    with pytest.raises(LexwareAPIError) as err:
+        client.get("/v1/articles")
+    assert "Organization is locked" in str(err.value)

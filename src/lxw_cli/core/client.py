@@ -275,7 +275,15 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
 
 
 def _extract_message(response: httpx.Response) -> str:
-    return _translate_text(_raw_message(response), response.status_code)
+    raw = _raw_message(response)
+    if response.status_code == 403 and _NO_ACCESS_RE.search(raw):
+        # Same refusal as `user_not_authorized`, just without that body
+        # (e.g. GET /v1/dunnings/{id} when the plan lacks dunnings).
+        return _ACCESS_DENIED
+    return _translate_text(raw, response.status_code)
+
+
+_NO_ACCESS_RE = re.compile(r"insufficient scope|user access rights|access[ _]denied", re.I)
 
 
 def _raw_message(response: httpx.Response) -> str:
@@ -479,7 +487,9 @@ _ACCESS_DENIED = (
     "Keine Berechtigung: Lexware lässt diese Aktion mit dem API-Schlüssel dieser "
     "Installation nicht zu. Entweder fehlen dem Lexware-Benutzer, der den "
     "Schlüssel erzeugt hat, die Rechte dafür, oder der Lexware-Tarif enthält "
-    "diese Funktion nicht. Andere Aktionen funktionieren weiter. Abhilfe: in "
+    "diese Funktion nicht. Das gilt für alle Datensätze dieser Art – weitere "
+    "Versuche, auch mit anderen Belegen, scheitern genauso; bitte nicht "
+    "wiederholen. Andere Aktionen funktionieren weiter. Abhilfe: in "
     "Lexware die Benutzerrechte bzw. den Tarif prüfen und danach einen neuen "
     "API-Schlüssel erzeugen und die Verbindung neu einrichten."
 )

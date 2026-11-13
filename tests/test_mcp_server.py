@@ -1062,11 +1062,14 @@ def test_chat_file_eu_storage_host_allowed_but_not_all_of_azure(monkeypatch) -> 
     import lxw_cli.mcp_server as mcp_server
 
     monkeypatch.delenv(mcp_server.ENV_CHAT_FILE_HOSTS, raising=False)
-    ok = "https://oaisdmntprnortheu.blob.core.windows.net/files/x.pdf?sig=s"
-    assert mcp_server._check_chat_file_url(ok).host == "oaisdmntprnortheu.blob.core.windows.net"
+    for region in ("northeu", "denmarkeast", "polandcentral"):  # Nov 2026 im Log gesehen
+        host = f"oaisdmntpr{region}.blob.core.windows.net"
+        ok = f"https://{host}/files/x.pdf?sig=s"
+        assert mcp_server._check_chat_file_url(ok).host == host
     for bad in (
         "https://evil.blob.core.windows.net/x.pdf",
         "https://oaisdmntprnortheu.blob.core.windows.net.evil.com/x.pdf",
+        "https://oaisdmntprevil.blob.core.windows.net/x.pdf",
     ):
         with pytest.raises(ValueError):
             mcp_server._check_chat_file_url(bad)
